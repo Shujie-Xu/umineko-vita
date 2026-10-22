@@ -89,6 +89,11 @@ void AsyncController::queue(std::unique_ptr<AsyncInstruction> inst) {
 		instQueue->thread = SDL_CreateThread(instQueue->threadLoopFunction,
 		                                     instQueue->name,
 		                                     instQueue->q.back()->ac);
+		// Nothing joins these threads (thread is only a "running" flag), and
+		// quit-on-empty queues start a new one each time they drain, so let
+		// each thread release its stack and handle when it exits.
+		if (instQueue->thread)
+			SDL_DetachThread(instQueue->thread);
 	}
 	SDL_AtomicUnlock(&instQueue->lock);
 }
@@ -251,6 +256,10 @@ void VirtualMutexes::debugJoin(int debug1, int debug2) {
 /* ---------------- Load image cache instruction ----------------- */
 
 void LoadImageCacheInstruction::execute() {
+#ifdef VITA
+	if (ons.nativeRunImagePrefetch(id, filename, allow_rgb))
+		return;
+#endif
 	ons.loadImageIntoCache(id, filename, allow_rgb);
 }
 
@@ -271,6 +280,13 @@ int imageCacheThreadLoop(void *arg) {
 /* ---------------- Load sound cache instruction ----------------- */
 
 void LoadSoundCacheInstruction::execute() {
+#ifdef VITA
+	// Lookahead decodes start as a line's voice starts, when the script may
+	// still need a synchronous dwaveload (seplay) before the text can show.
+	// SDL threads inherit the creator's priority, so on a shared core this
+	// optional work can hold such a load back; let those loads preempt it.
+	SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
+#endif
 	ons.loadSoundIntoCache(id, filename, true);
 }
 

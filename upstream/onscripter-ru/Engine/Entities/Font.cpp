@@ -39,11 +39,18 @@ GlyphParams Fontinfo::getGlyphParams() {
 	auto &f = fonts.getFont(s.font_number, s.preset_id);
 
 	f.setStyle(s.is_bold, s.is_italic);
-	f.setSize(s.font_size, s.font_number, s.preset_id);
+	f.setSize(s.font_size, s.font_number, s.size_preset_id);
 	f.setBorder(s.is_border ? s.border_width : 0);
 
-	gp.font_number  = s.font_number;
-	gp.preset_id    = fonts.glyphStorageOptimisation ? -1 : s.preset_id;
+	// Key presets only by what they change in the rendered glyph (font override,
+	// size multiplier), so colour-only presets such as red and blue truth share
+	// the uncoloured base glyphs of the surrounding text instead of rendering their own.
+	gp.font_number    = s.font_number;
+	gp.preset_id      = fonts.glyphStorageOptimisation || &f == &fonts.getFont(s.font_number, -1) ? -1 : s.preset_id;
+	gp.size_preset_id = fonts.glyphStorageOptimisation ||
+	                            fonts.getMultiplier(s.font_number, s.size_preset_id) == fonts.getMultiplier(s.font_number, -1) ?
+	                        -1 :
+	                        s.size_preset_id;
 	gp.font_size    = s.font_size;
 	gp.border_width = s.is_border ? s.border_width : 0;
 
@@ -258,7 +265,7 @@ GlyphValues *Font::renderGlyph(GlyphParams *key, SDL_Color fg, SDL_Color bg) {
 		FT_Glyph_Copy(actual_glyph, &border_glyph);
 		// Turn it into bordered version.
 		//sendToLog(LogLevel::Error, "Somehow we are in border for %c\n",key->unicode);
-		int border_w = key->border_width * fonts.getMultiplier(key->font_number, key->preset_id);
+		int border_w = key->border_width * fonts.getMultiplier(key->font_number, key->size_preset_id);
 		drawBorder(&border_glyph, border_w);
 		/* Convert glyph to surface */
 

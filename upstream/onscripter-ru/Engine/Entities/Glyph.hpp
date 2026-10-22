@@ -23,6 +23,9 @@ struct GlyphParams {
 	uint32_t unicode;
 	uint32_t font_number;
 	int preset_id;
+	// Selects the font-multiplier entry, which can differ from preset_id
+	// when a preset inherits its size (see TextStyleProperties).
+	int size_preset_id;
 	int font_size;
 	int border_width;
 	SDL_Color glyph_color;
@@ -67,7 +70,8 @@ struct GlyphParamsHash {
 	size_t operator()(const GlyphParams &gp) const {
 		return gp.font_number ^ (static_cast<size_t>(gp.font_size) << 4) ^ (static_cast<size_t>(gp.unicode) << 10) ^
 		       (static_cast<size_t>(gp.is_bold) << 20) ^ (static_cast<size_t>(gp.is_italic) << 21) ^ (static_cast<size_t>(gp.is_underline) << 22) ^
-		       (static_cast<size_t>(gp.is_border) << 23) ^ (static_cast<size_t>(gp.is_colored) << 24) ^ (static_cast<size_t>(gp.is_gradient) << 25);
+		       (static_cast<size_t>(gp.is_border) << 23) ^ (static_cast<size_t>(gp.is_colored) << 24) ^ (static_cast<size_t>(gp.is_gradient) << 25) ^
+		       (static_cast<size_t>(gp.preset_id + 1) << 26) ^ (static_cast<size_t>(gp.size_preset_id + 1) << 18);
 	}
 };
 
@@ -75,6 +79,10 @@ struct GlyphParamsEqual {
 	bool operator()(const GlyphParams &left, const GlyphParams &right) const {
 		bool base_params_equal = (left.unicode == right.unicode &&
 		                          left.font_number == right.font_number &&
+		                          // Presets select font overrides and size multipliers, so glyphs
+		                          // of equal nominal size may differ (both are -1 without either).
+		                          left.preset_id == right.preset_id &&
+		                          left.size_preset_id == right.size_preset_id &&
 		                          left.font_size == right.font_size &&
 		                          left.is_bold == right.is_bold &&
 		                          left.is_italic == right.is_italic &&

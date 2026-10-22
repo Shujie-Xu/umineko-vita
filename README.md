@@ -19,8 +19,8 @@ This repository contains a PS Vita port of the **[Umineko Project](https://www.u
 
 The engine has been **heavily modified and optimized for the PS Vita**: hardware video decoding through the Vita's native media framework, a rewritten textbox and HUD presentation pipeline, memory allocation and loading-time optimizations, and assets tailored specifically for the Vita's display and hardware limits.
 
-> **About Version 1.1:** 
-> Version 1.1 adds multi-language support (**English**, **Japanese**, **Brazilian Portuguese**, and **Spanish**), performance improvements, and bug fixes.
+> **About Version 1.3:**
+> Version 1.3 requires **Hotfix v2** (see step 4 below).
 >
 > The porting work was executed with AI assistance and supervised and tested on real hardware by a human. Parts of every chapter, menus, saving/loading, and videos have been verified on hardware, but **the full game has not been play-tested from start to finish**. If you encounter an issue (a crash, stuck scene, or graphical glitch), please [open an issue](https://github.com/stoicpingu/umineko-vita/issues) detailing where in the story it occurred.
 
@@ -32,31 +32,26 @@ A short legal note appears in the [Disclaimer](#disclaimer) section near the bot
 
 In order to properly install the game, follow these steps:
 
-1. **Install kubridge**: Download [kubridge](https://github.com/bythos14/kubridge/releases/) and copy `kubridge.skprx` to your taiHEN plugins folder (usually `ur0:tai/`). Add it to your `ur0:tai/config.txt` under `*KERNEL`:
-   ```text
-   *KERNEL
-   ur0:tai/kubridge.skprx
-   ```
-2. **Extract Shader Compiler**: Ensure `libshacccg.suprx` is present in `ur0:/data/`. If missing, follow [this guide](https://samilops2.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx) to extract it.
-3. **Game Ownership**: Ensure you legally own the required original games per the [Umineko Project copyright message](https://www.umineko-project.org/en/copyright-message/).
-4. **Download & Extract Base Game Data**: Download the main game data archive [`umineko-vita-release.zip`](https://drive.google.com/file/d/1onPuW4rIEvKBaPn4ZX_vYy0WexlTkG01/view?usp=sharing) (~4.8 GB). **You need this archive, not the Umineko Project's PC download**: the assets in it were resized and re-encoded for the Vita's screen, memory and hardware video decoder, and the configuration files were made specifically for this port — the PC files will not work with it. The archive is **password protected** with the Umineko Project's own passphrase, exactly like their releases: owners of the games can build it from their manual and game files as described in the [copyright message](https://www.umineko-project.org/en/copyright-message/) (just google things ;)). The password is not published here. Extract the archive to obtain the `umineko` folder, and copy it to `ux0:data/` on your Vita so that the path is `ux0:data/umineko/`.
-5. **Install English Hotfix**: Download and install the [English Hotfix](https://drive.google.com/file/d/19PtCyNjt13L0ylhAWaDcPSOH68gW9ojE/view?usp=drive_link). Extract and copy its contents into `ux0:data/umineko/`, overwriting existing files when prompted.
-6. **(Optional) Install Language Addons**:
+1. **Extract Shader Compiler**: Ensure `libshacccg.suprx` is present in `ur0:/data/`. If missing, follow [this guide](https://samilops2.gitbook.io/vita-troubleshooting-guide/shader-compiler/extract-libshacccg.suprx) to extract it.
+2. **Game Ownership**: Ensure you legally own the required original games per the [Umineko Project copyright message](https://www.umineko-project.org/en/copyright-message/).
+3. **Download & Extract Base Game Data**: Download the main game data archive [`umineko-vita-release.zip`](https://drive.google.com/file/d/1onPuW4rIEvKBaPn4ZX_vYy0WexlTkG01/view?usp=sharing) (~4.8 GB). **You need this archive, not the Umineko Project's PC download**: the assets in it were resized and re-encoded for the Vita's screen, memory and hardware video decoder, and the configuration files were made specifically for this port — the PC files will not work with it. The archive is **password protected** with the Umineko Project's own passphrase, exactly like their releases: owners of the games can build it from their manual and game files as described in the [copyright message](https://www.umineko-project.org/en/copyright-message/) (just google things ;)). The password is not published here. Extract the archive to obtain the `umineko` folder, and copy it to `ux0:data/` on your Vita so that the path is `ux0:data/umineko/`.
+4. **Install Hotfix v2**: Download and install [Hotfix v2](https://drive.google.com/file/d/1CqddCytePUTiaHStqhw6G7Gcfk6McnE4/view?usp=sharing). Extract and copy its contents into `ux0:data/umineko/`, overwriting existing files when prompted. It includes everything from the previous English Hotfix, so that one is no longer needed, and it applies to every language. Install it before or after the language addons; the order does not matter.
+5. **(Optional) Install Language Addons**:
    - Language addons are available for **[Japanese (JP)](https://drive.google.com/file/d/11_y92UMVBXb-yFNN5KaO3Up25Jr22q1A/view?usp=drive_link)**, **[Brazilian Portuguese (PT-BR)](https://drive.google.com/file/d/1iQNFmuhpnWUwzsGJfr58sutvoaR72x6j/view?usp=drive_link)**, and **[Spanish (ES)](https://drive.google.com/file/d/1jTuhnCQhlD7dvvk1W61MRKE-_u6mvDdK/view?usp=drive_link)**.
    - All language addons install identically: extract the zip and copy the `umineko` folder directly to `ux0:data/`, overwriting any existing files when prompted.
    - > ⚠️ **Save File Compatibility Note:** Each language runs its own dedicated script file (`en.file`, `jp.file`, `pt.file`, `es.file`) and maintains separate save states. Story progress saved in English cannot be loaded when playing in Japanese or another language, and vice-versa.
-7. **Install VPK**: Download and install `umineko.vpk` from the [Releases](https://github.com/stoicpingu/umineko-vita/releases/latest) page.
+6. **Install VPK**: Download and install `umineko.vpk` from the [Releases](https://github.com/stoicpingu/umineko-vita/releases/latest) page.
 
 The final layout under `ux0:data/umineko/` should look like this:
 
 ```text
 ux0:data/umineko/
-├── libmain.so          (the game engine)
 ├── en.file             (English script; jp.file, pt.file, or es.file for other languages)
 ├── ons.cfg             (configuration settings, see Customization)
 ├── default.cfg
 ├── game.hash
 ├── render_scale.txt
+├── native-image-sizes.tsv
 ├── backgrounds/
 ├── fonts/
 ├── graphics/
@@ -67,7 +62,7 @@ ux0:data/umineko/
 └── save/               (save files and pre-rendered caches)
 ```
 
-Do not rename or move files inside `ux0:data/umineko/` — the game validates its file integrity against `game.hash` on startup.
+Do not rename or move files inside `ux0:data/umineko/`; the game looks them up by these exact paths.
 
 ---
 
@@ -114,23 +109,20 @@ Additional engine behavior can be customized by editing `ux0:data/umineko/ons.cf
 
 ### Prerequisites
 
-To compile the loader and native components, you will need:
-- A [vitasdk](https://github.com/vitasdk) toolchain compiled for `softfp` ABI.
-- [vitaShaRK](https://github.com/Rinnegatamante/vitaShaRK) (`make install`).
-- [kubridge](https://github.com/bythos14/kubridge) (`cmake -B build && make -C build install`).
-- [vitaGL](https://github.com/Rinnegatamante/vitaGL) built with:
-  ```bash
-  make SOFTFP_ABI=1 CIRCULAR_VERTEX_POOL=2 HAVE_GLSL_SUPPORT=1
-  ```
+- A [vitasdk](https://github.com/vitasdk) toolchain with the soft-float (`softfp`) packages the engine links: SDL2, SDL2_image, SDL2_mixer, [vitaGL](https://github.com/Rinnegatamante/vitaGL), [vitaShaRK](https://github.com/Rinnegatamante/vitaShaRK), HarfBuzz, FriBidi, libass, LuaJIT and the audio/image codecs listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+- FFmpeg 6.0 static libraries built for the Vita in `build/native-media-deps/install` (or pass `-DONS_FFMPEG_ROOT=<prefix>`).
+- If your vitasdk ships hard-float `libz.a` / `libfreetype.a`, build soft-float zlib 1.3.2 and FreeType 2.14.3 (`-mfloat-abi=softfp`) and put them first on the linker path, e.g. `-DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,nocopyreloc -L<prefix>/lib"`.
 
-### Building the Loader & VPK
+### Building the eboot & VPK
 
 ```bash
-cmake -S . -B build
-cmake --build build
+cmake -S . -B native-build -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build native-build
 ```
 
-This generates `build/eboot.bin` and `build/umineko.vpk`.
+This generates `native-build/eboot.bin` and `native-build/umineko-native.vpk`. Add `-DONS_VITA_FILE_LOGGING=ON` for a diagnostic build that writes `ux0:data/umineko-native/err.txt`.
 
 ---
 
@@ -144,7 +136,6 @@ This generates `build/eboot.bin` and `build/umineko.vpk`.
   - **Brazilian Portuguese**: [Knox Translations](https://knox.fansub.com.br/)
   - **Spanish**: [Universo When They Cry](https://universowtc.github.io/)
 - **[Rinnegatamante](https://github.com/Rinnegatamante/)** — For vitaGL, vitaShaRK.
-- **[bythos14](https://github.com/bythos14/)** — For kubridge.
 - **[Spazzery](https://gbatemp.net/members/spazzery.495271/)** — For suggestions and motivation.
 - **PS Vita Community** — Everyone on Reddit and Discord keeping Vita development active.
 
@@ -160,7 +151,7 @@ This repository contains only source code for the Vita port and engine modificat
 
 ## License
 
-The port loader is licensed under the MIT License — see [LICENSE](LICENSE). The engine modifications to ONScripter-RU are distributed under GNU GPL v2 / BSD 3-Clause — see [licenses/](licenses/).
+The port's own code is licensed under the MIT License — see [LICENSE](LICENSE). The engine modifications to ONScripter-RU are distributed under GNU GPL v2 / BSD 3-Clause — see [licenses/](licenses/).
 
 [cross]: https://raw.githubusercontent.com/v-atamanenko/sdl2sand/master/img/cross.svg "Cross"
 [circl]: https://raw.githubusercontent.com/v-atamanenko/sdl2sand/master/img/circle.svg "Circle"

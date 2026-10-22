@@ -302,6 +302,13 @@ void ONScripter::waitEvent(int count, bool nopPreferred) {
 	//sendToLog(LogLevel::Info, "----waitEventSub(%i)\n", count);
 	static unsigned int lastExitTime   = 0;
 	unsigned int externalTimeThreshold = 5; // for instance
+#ifdef VITA
+	// While skipping, each optional frame costs a full scene render plus a
+	// vsync wait, which on Vita dominates the per-line script work. Present
+	// roughly every 50 ms instead; input is still polled at that rate.
+	if ((skip_mode & SKIP_NORMAL) || keyState.ctrl)
+		externalTimeThreshold = 50;
+#endif
 
 	unsigned int thisCallTime = SDL_GetTicks();
 	if (!(skip_mode & SKIP_SUPERSKIP) && lastExitTime) {
@@ -1729,6 +1736,20 @@ void ONScripter::nativeSeedTitleHover() {
 		}
 	}
 	nativeTitleHoverSeeded = title;
+
+	// The backlog jump prompt opens with Yes (spbtn 3,503) focused; later
+	// btnwait2 rounds of the same prompt keep the player's choice.
+	bool jumpPrompt = current_label_info && current_label_info->name &&
+	                  equalstr(current_label_info->name, "log_jump_request_loop");
+	if (jumpPrompt && !nativeLogJumpHoverSeeded) {
+		int index = buttonNumberToLinkIndex(503);
+		if (index >= 0) {
+			controlMode = ControlMode::Arrow;
+			lastKnownHoveredButtonNumber = 503;
+			lastKnownHoveredButtonLinkIndex = index;
+		}
+	}
+	nativeLogJumpHoverSeeded = jumpPrompt;
 }
 
 bool ONScripter::nativePendingTextKeyFresh() {
@@ -1780,10 +1801,13 @@ void ONScripter::nativePrefilterKey(SDL_Event &event) {
 		event.type = SDL_FIRSTEVENT;
 		return;
 	}
+	// Backlog jump prompt: Yes/No side by side; Circle always answers No.
+	bool jumpPrompt = current_label_info && current_label_info->name &&
+	                  equalstr(current_label_info->name, "log_jump_request_loop");
 	if ((code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_RIGHT) && current_label_info &&
 	    current_label_info->name &&
 	    (equalstr(current_label_info->name, "scenario_jump_btnwait") ||
-	     equalstr(current_label_info->name, "scenario_jump_q3")))
+	     equalstr(current_label_info->name, "scenario_jump_q3") || jumpPrompt))
 		code = code == SDL_SCANCODE_LEFT ? SDL_SCANCODE_UP : SDL_SCANCODE_DOWN;
 	// Triggers retain identity on Bookmarks, and use normal actions elsewhere.
 	if (!nativeBookmarkPageButton(0)) {
@@ -1791,8 +1815,8 @@ void ONScripter::nativePrefilterKey(SDL_Event &event) {
 		else if (code == VitaInput::RightTrigger) code = ONS_SCANCODE_SKIP;
 	}
 	if (code == VitaInput::Circle) {
-		code = text ? SDL_SCANCODE_Z : SDL_SCANCODE_ESCAPE;
-		if (text && event.type == SDL_KEYUP) nativeDirectSaveUntil = SDL_GetTicks() + 5000;
+		code = text && !jumpPrompt ? SDL_SCANCODE_Z : SDL_SCANCODE_ESCAPE;
+		if (code == SDL_SCANCODE_Z && event.type == SDL_KEYUP) nativeDirectSaveUntil = SDL_GetTicks() + 5000;
 	} else if (code == SDL_SCANCODE_Z && event.type == SDL_KEYUP && event.key.timestamp != 0) {
 		nativeDirectSaveUntil = 0;
 		nativeDirectSaveActive = false;

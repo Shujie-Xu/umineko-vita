@@ -10,6 +10,9 @@
 #include "Engine/Graphics/PNG.hpp"
 #include "Engine/Graphics/Common.hpp"
 #include "Engine/Graphics/GPU.hpp"
+#ifdef VITA
+#include "platform/vita/memory.hpp"
+#endif
 
 PNGLoader::PNGLoader() {
 	this->png_create_info_struct  = ::png_create_info_struct;
@@ -196,7 +199,12 @@ SDL_Surface *PNGLoader::loadPng(SDL_RWops *src) {
 #endif
 	}
 
-	gpu.scheduleLoadImage(width, height);
+#ifdef VITA
+	// A lookahead prefetch reserves no texture: it may never be shown, and
+	// its upload makes one when it is.
+	if (!VitaMemory::softAllocations())
+#endif
+		gpu.scheduleLoadImage(width, height);
 
 	surface = SDL_CreateRGBSurface(SDL_SWSURFACE, width, height,
 	                               bit_depth * num_channels, Rmask, Gmask, Bmask, Amask);

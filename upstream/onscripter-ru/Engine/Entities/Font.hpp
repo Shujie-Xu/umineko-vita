@@ -128,6 +128,9 @@ public:
 		bool no_break{false};
 
 		int font_size{0};
+		// The preset that set font_size, for font-multiplier lookup. A preset with
+		// an inherited size (-1) keeps the surrounding text's scaling with its size.
+		int size_preset_id{-1};
 
 		std::string ruby_text;
 
@@ -168,8 +171,10 @@ public:
                 shadow_distance[1] = props.shadow_distance[1];
             shadow_color = props.shadow_color;
             no_break     = props.no_break;
-            if (props.font_size != -1)
-                font_size = props.font_size;
+            if (props.font_size != -1) {
+                font_size      = props.font_size;
+                size_preset_id = props.size_preset_id;
+            }
             character_spacing = props.character_spacing;
             if (props.line_height != -1)
                 line_height = props.line_height;

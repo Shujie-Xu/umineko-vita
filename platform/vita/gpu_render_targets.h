@@ -9,4 +9,6 @@ void ons_vita_prepare_texture_upload(void *storage);
 void ons_vita_note_target_scene(const SceGxmRenderTarget *target);
 /* Submit the open scene before synchronously reading its pixels on the CPU. */
 void ons_vita_finish_readback(void);
+/* Run vitaGL's deferred frees now instead of over the next presented frames. */
+void ons_vita_reclaim_deferred_gpu_memory(void);
 #endif

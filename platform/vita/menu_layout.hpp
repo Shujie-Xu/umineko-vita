@@ -29,7 +29,19 @@ inline bool settingsControl(const char *label, int id) {
            id == 268 || id == 272 || id == 276 || id == 277 ||
            (id >= 307 && id <= 318) || id == 380 || id == 381;
 }
+// Backlog "jump to this line?" prompt: hint text sprite 2 and the Yes/No text
+// buttons 3 and 4 (*log_jump_request). The script centres them by their sizes.
+inline bool logJumpPrompt(const char *label, int id) {
+    return label && std::string_view(label) == "log_jump_request" && id >= 2 && id <= 4;
+}
+// Largest scale, at most the requested one, keeping a sprite of the given
+// scaled width within the 1920-wide script screen with a 60px margin per side.
+inline float fitScale(float scale, float scaledWidth, float screenWidth) {
+    const float limit = screenWidth - 120;
+    return scaledWidth > limit && scaledWidth > 0 ? scale * limit / scaledWidth : scale;
+}
 inline float imageScale(const char *filename, const char *label, int id) {
+    if (logJumpPrompt(label, id)) return 1.6f;
     switch (titlePart(filename)) {
         case TitlePart::Button: case TitlePart::Description: case TitlePart::PauseButton: return 1.25f;
         case TitlePart::TitleConfirmation:

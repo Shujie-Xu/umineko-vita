@@ -198,6 +198,8 @@ class GPUBigImage {
 	std::vector<GPU_Rect> storageAreas;
 	uint32_t storageWidth{0}, storageHeight{0};
 	void create(SDL_Surface *surface = nullptr);
+	// Uploads one tile from surface_area of surface (a target if surface is null).
+	GPU_Image *uploadTile(SDL_Surface *surface, GPU_Rect &surface_area, bool premultiplied);
 
 public:
 	uint16_t w{0}, h{0};
@@ -210,6 +212,16 @@ public:
 	GPUBigImage(SDL_Surface *surface);
 	GPUBigImage(uint16_t w_, uint16_t h_, int channels_);
 	GPUBigImage() = default;
+	// Largest tile edge: smaller on Vita, so fragmented pools can place tiles.
+	static int tileLimit();
+#ifdef VITA
+	// Streamed construction: no tiles yet. The caller decodes the image in
+	// bands of tileLimit() rows (fewer for the last) and adds them top to
+	// bottom, so the whole image never exists in CPU memory at once.
+	struct Streamed {};
+	GPUBigImage(uint16_t w_, uint16_t h_, int channels_, Streamed);
+	void addBand(SDL_Surface *band, uint32_t y);
+#endif
 	void setVirtualResolution(uint32_t logicalW, uint32_t logicalH);
 };
 
@@ -680,6 +692,12 @@ public:
 		}
 		globalImagePool.clear();
 	}
+
+#ifdef VITA
+	// Drop the image/sound caches and pooled GPU images, then let vitaGL free
+	// everything queued for deferred release. For a texture that got no storage.
+	void reclaimMemoryForTexture();
+#endif
 
 	GPU_Image *getCanvasImage() { return canvasImagePool.getImage(); }
 	void giveCanvasImage(GPU_Image *im) { canvasImagePool.giveImage(im); }

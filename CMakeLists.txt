@@ -13,7 +13,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(ONS_UPSTREAM "${CMAKE_CURRENT_SOURCE_DIR}/upstream/onscripter-ru")
 set(VITA_TITLEID "UMNK00001" CACHE STRING "Umineko release application ID")
-set(VITA_VERSION "01.20" CACHE STRING "Umineko release version (v1.2)")
+set(VITA_VERSION "01.30" CACHE STRING "Umineko release version (v1.3)")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
 option(ONS_VITA_EXPORT_SHADERS "Developer-only: compile and export native shaders on the Vita" OFF)
 option(ONS_VITA_RENDER_DIAGNOSTICS "Run a small, one-shot GPU probe at the title" OFF)
@@ -50,7 +50,7 @@ list(TRANSFORM ONS_SUPPORT_SOURCES PREPEND "${ONS_UPSTREAM}/")
 add_executable(onscripter_vita ${ONS_ENGINE_SOURCES} ${ONS_SUPPORT_SOURCES}
   "${ONS_RESOURCE_SOURCE}" platform/vita/platform.cpp platform/vita/assets.cpp
   platform/vita/gxm_checked.c platform/vita/gl_init.c platform/vita/render_diagnostics.cpp
-  platform/vita/startup_image.cpp)
+  platform/vita/startup_image.cpp platform/vita/memory.cpp platform/vita/png_stream.c)
 if(ONS_VITA_RENDER_DIAGNOSTICS)
   target_compile_definitions(onscripter_vita PRIVATE ONS_VITA_RENDER_DIAGNOSTICS)
 endif()

@@ -15,7 +15,15 @@
 #include "Resources/Support/Resources.hpp"
 #include "Resources/Support/Version.hpp"
 #if defined(VITA)
+#include "Engine/Components/Async.hpp"
 #include "platform/vita/prepared_surface.hpp"
+#include <vitaGL.h>
+extern "C" {
+#include "platform/vita/gpu_render_targets.h"
+}
+#endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+#include "platform/vita/memory.hpp"
 #endif
 
 #include <stdexcept>
@@ -1662,6 +1670,112 @@ bool CombinedImagePool::generate() {
 // **  GPUBigImage  **
 // ***********************************
 
+#if defined(VITA)
+// Storage of a texture as vitaGL sees it, or nullptr when gpu_alloc_texture
+// found no pool space. Restores the GL binding SDL_gpu believes is current.
+static void *vitaTextureStorage(GPU_Image *image) {
+	if (!image)
+		return nullptr;
+	GLint active = 0, previous = 0;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous);
+	glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(GPU_GetTextureHandle(image)));
+	void *storage = vglGetTexDataPointer(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, previous);
+	glActiveTexture(active);
+	return storage;
+}
+
+void GPUController::reclaimMemoryForTexture() {
+	ons.nativeReleasePrefetches(); // Also makes an in-flight prefetch drop its result.
+	{
+		Lock lock(&ons.imageCache);
+		ons.imageCache.clearAll();
+	}
+	{
+		Lock lock(&ons.soundCache);
+		ons.soundCache.clearAll();
+	}
+	clearImagePools();
+	// Pending blits may still reference images freed above.
+	GPU_FlushBlitBuffer();
+	ons_vita_reclaim_deferred_gpu_memory();
+}
+#endif
+
+int GPUBigImage::tileLimit() {
+#if defined(VITA)
+	// Smaller tiles need smaller contiguous blocks, which a long session's
+	// fragmented vitaGL pools can still place (5.9 MB instead of 11.8 MB for
+	// a 960 px wide RGB credits strip).
+	return std::min(gpu.max_texture, 2048);
+#else
+	return gpu.max_texture;
+#endif
+}
+
+GPU_Image *GPUBigImage::uploadTile(SDL_Surface *surface, GPU_Rect &surface_area, bool premultiplied) {
+	auto makeTile = [&]() {
+		GPU_Image *chunk{nullptr};
+		if (surface) {
+#if !defined(IOS) && !defined(DROID) // There is some issue with loadGPUImageByChunks on iOS
+			if (!(ons.skip_mode & ONScripter::SKIP_SUPERSKIP)) {
+				chunk = gpu.loadGPUImageByChunks(surface, &surface_area);
+			} else
+#endif
+			{
+				chunk = gpu.createImage(surface_area.w, surface_area.h, channels, false, false);
+#ifndef VITA
+				GPU_GetTarget(chunk);
+#endif
+				gpu.updateImage(chunk, nullptr, surface, &surface_area);
+			}
+			if (!premultiplied)
+				gpu.multiplyAlpha(chunk);
+		} else {
+			chunk = gpu.createImage(surface_area.w, surface_area.h, channels);
+			GPU_GetTarget(chunk);
+		}
+		return chunk;
+	};
+	GPU_Image *chunk = makeTile();
+#if defined(VITA)
+	if (!vitaTextureStorage(chunk)) {
+		// vitaGL's gpu_alloc_texture reports nothing when its pools are
+		// full: the tile would stay black. Free what we can and retry once.
+		sendToLog(LogLevel::Warn, "BigImage: tile %u (%.0fx%.0f) got no texture storage; reclaiming GPU memory and retrying\n",
+		          static_cast<unsigned>(images.size()), surface_area.w, surface_area.h);
+#if defined(ONS_VITA_FILE_LOGGING)
+		VitaMemory::logBudget("big image tile failed");
+#endif
+		// A storage-less image must not return to the reuse pools.
+		if (chunk)
+			GPU_FreeImage(chunk);
+		gpu.reclaimMemoryForTexture();
+#if defined(ONS_VITA_FILE_LOGGING)
+		VitaMemory::logBudget("big image reclaimed");
+#endif
+		while (glGetError() != GL_NO_ERROR) {
+		}
+		chunk = makeTile();
+		if (!vitaTextureStorage(chunk))
+			sendToLog(LogLevel::Error, "BigImage: tile %u (%.0fx%.0f) still has no texture storage\n",
+			          static_cast<unsigned>(images.size()), surface_area.w, surface_area.h);
+	}
+#endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Without storage every glTexSubImage2D into the tile fails with 0x502.
+	void *storage      = vitaTextureStorage(chunk);
+	const GLenum error = glGetError();
+	sendToLog(error == GL_NO_ERROR && storage ? LogLevel::Warn : LogLevel::Error,
+	          "BigImage: tile %u from %.0f,%.0f %.0fx%.0f: image %p texture %ux%u storage %p, GL error 0x%x\n",
+	          static_cast<unsigned>(images.size()), surface_area.x, surface_area.y, surface_area.w, surface_area.h,
+	          static_cast<void *>(chunk), chunk ? chunk->texture_w : 0, chunk ? chunk->texture_h : 0, storage, error);
+#endif
+	return chunk;
+}
+
 void GPUBigImage::create(SDL_Surface *surface) {
 	if (gpu.max_texture <= 0)
 		throw std::runtime_error("Cannot tile an image before GPU initialization");
@@ -1669,6 +1783,9 @@ void GPUBigImage::create(SDL_Surface *surface) {
 	std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)> prepared(
 	    VitaPixels::premultipliedCopy(surface), SDL_FreeSurface);
 	if (prepared) surface = prepared.get();
+	const bool premultiplied = prepared != nullptr;
+#else
+	const bool premultiplied = false;
 #endif
 	storageWidth = w;
 	storageHeight = h;
@@ -1678,38 +1795,59 @@ void GPUBigImage::create(SDL_Surface *surface) {
 		storageHeight = static_cast<uint32_t>(std::max(1.0f, std::ceil(h * gpu.renderScale)));
 	}
 #endif
-	storageAreas = GPUImageTiling::makeTiles<GPU_Rect>(storageWidth, storageHeight, gpu.max_texture);
+	storageAreas = GPUImageTiling::makeTiles<GPU_Rect>(storageWidth, storageHeight, tileLimit());
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: nothing reports a tile texture vitaGL could not
+	// allocate (GL_OUT_OF_MEMORY), so record each tile and the pool usage.
+	sendToLog(LogLevel::Warn, "BigImage: %ux%u storage, %d bpp, %u tiles of at most %d px, surface %s\n",
+	          static_cast<unsigned>(storageWidth), static_cast<unsigned>(storageHeight), channels,
+	          static_cast<unsigned>(storageAreas.size()), tileLimit(), surface ? "yes" : "no");
+	VitaMemory::logBudget("big image before");
+	while (glGetError() != GL_NO_ERROR) {
+	}
+#endif
 	for (auto tmp : storageAreas) {
-
-		GPU_Image *chunk{nullptr};
-		if (surface) {
-#if !defined(IOS) && !defined(DROID) // There is some issue with loadGPUImageByChunks on iOS
-			if (!(ons.skip_mode & ONScripter::SKIP_SUPERSKIP)) {
-				chunk = gpu.loadGPUImageByChunks(surface, &tmp);
-			} else
-#endif
-			{
-				chunk = gpu.createImage(tmp.w, tmp.h, channels, false, false);
-#ifndef VITA
-				GPU_GetTarget(chunk);
-#endif
-				gpu.updateImage(chunk, nullptr, surface, &tmp);
-			}
-#ifdef VITA
-			if (!prepared)
-#endif
-				gpu.multiplyAlpha(chunk);
-		} else {
-			chunk = gpu.createImage(tmp.w, tmp.h, channels);
-			GPU_GetTarget(chunk);
-		}
-		images.emplace_back(chunk);
+		images.emplace_back(uploadTile(surface, tmp, premultiplied));
 		imageAreas.push_back(tmp);
-
 	}
 	if (storageWidth != w || storageHeight != h)
 		setVirtualResolution(w, h);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	VitaMemory::logBudget("big image after");
+#endif
 }
+
+#ifdef VITA
+GPUBigImage::GPUBigImage(uint16_t w_, uint16_t h_, int channels_, Streamed)
+    : storageWidth(w_), storageHeight(h_), w(w_), h(h_), channels(channels_) {
+	if (gpu.max_texture <= 0)
+		throw std::runtime_error("Cannot tile an image before GPU initialization");
+	if (w && h)
+		storageAreas = GPUImageTiling::makeTiles<GPU_Rect>(storageWidth, storageHeight, tileLimit());
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn, "BigImage: %ux%u storage, %d bpp, %u tiles of at most %d px, streamed\n",
+	          static_cast<unsigned>(storageWidth), static_cast<unsigned>(storageHeight), channels,
+	          static_cast<unsigned>(storageAreas.size()), tileLimit());
+	VitaMemory::logBudget("big image before");
+	while (glGetError() != GL_NO_ERROR) {
+	}
+#endif
+}
+
+void GPUBigImage::addBand(SDL_Surface *band, uint32_t y) {
+	// makeTiles lists tiles row by row, so appending each band's tiles keeps
+	// images[i] paired with storageAreas[i].
+	for (size_t i = images.size(); i < storageAreas.size() && storageAreas[i].y == y; ++i) {
+		GPU_Rect bandArea{storageAreas[i].x, 0, storageAreas[i].w, storageAreas[i].h};
+		images.emplace_back(uploadTile(band, bandArea, false));
+		imageAreas.push_back(storageAreas[i]);
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	if (images.size() == storageAreas.size())
+		VitaMemory::logBudget("big image after");
+#endif
+}
+#endif
 
 GPUBigImage::GPUBigImage(SDL_Surface *surface) {
 	if (!surface || surface->w == 0 || surface->h == 0)

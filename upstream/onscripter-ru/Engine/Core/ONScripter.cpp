@@ -2002,23 +2002,169 @@ void ONScripter::nativeRecordLineVoice(int channel, const char *file) {
 	log.tmpVoices.back()[ch] = path;
 }
 
+// dwaveload decodes the whole Ogg (Vorbis + resampling to the mixer format)
+// before the line can continue, which is the pause after advancing. The
+// script's *lv decodes upcoming voices ahead (lookahead + async_cache_snd),
+// but only with object_caching, which the Vita leaves off because it also
+// caches images. Do the same for the next voices only, in a small slot of
+// our own: those of the current dialogue, then of the following lines.
+void ONScripter::nativePrefetchVoices() {
+	constexpr int slot = 0x7650, capacity = 4;
+	constexpr size_t ahead = 2, scanLimit = 64 * 1024;
+	if (!audio_open_flag || !dlgCtrl.dialogueProcessingState.active ||
+	    (skip_mode & (SKIP_NORMAL | SKIP_SUPERSKIP)) || keyState.ctrl)
+		return;
+
+	std::vector<std::string> found;
+	// Matches the script's exlv regex: lv <ch>*"<folder>"*"<name>"
+	auto scan = [&found, ahead](const char *p, const char *end) {
+		auto digits = [end](const char *&q) {
+			const char *s = q;
+			while (q < end && *q >= '0' && *q <= '9') q++;
+			return q > s;
+		};
+		auto quoted = [end](const char *&q, bool name, std::string &out) {
+			if (q >= end || *q++ != '"') return false;
+			const char *s = q;
+			while (q < end && ((*q >= '0' && *q <= '9') ||
+			                   (name && (std::isalpha(static_cast<unsigned char>(*q)) || *q == '_'))))
+				q++;
+			if (q == s || q >= end || *q != '"') return false;
+			out.assign(s, q++);
+			return true;
+		};
+		for (; p + 3 < end && found.size() < ahead; p++) {
+			if (p[0] != 'l' || p[1] != 'v' || p[2] != ' ') continue;
+			const char *q = p + 3;
+			std::string folder, name;
+			if (!digits(q) || q >= end || *q++ != '*' || !quoted(q, false, folder) ||
+			    q >= end || *q++ != '*' || !quoted(q, true, name))
+				continue;
+			std::string path = "sound\\voice\\" + folder + "\\" + name + ".ogg";
+			translatePathSlashes(path);
+			if (std::find(found.begin(), found.end(), path) == found.end())
+				found.emplace_back(std::move(path));
+			p = q - 1;
+		}
+	};
+
+	const char *dialogue = dlgCtrl.dataPart.c_str();
+	if (dlgCtrl.currentTextPos < dlgCtrl.dataPart.size())
+		scan(dialogue + dlgCtrl.currentTextPos, dialogue + dlgCtrl.dataPart.size());
+	// Where the script's lookahead starts: the main script past this line.
+	if (!callStack.empty() && callStack.front().next_script) {
+		auto offset = script_h.getOffset(callStack.front().next_script);
+		auto length = script_h.getScriptLength();
+		if (offset >= 0 && static_cast<size_t>(offset) < length) {
+			const char *start = callStack.front().next_script;
+			scan(start, start + std::min(length - offset, scanLimit));
+		}
+	}
+
+	for (auto &path : found) {
+		if (std::find(nativePrefetchedVoices.begin(), nativePrefetchedVoices.end(), path) !=
+		    nativePrefetchedVoices.end())
+			continue; // queued or cached recently
+		{
+			Lock lock(&soundCache);
+			if (!nativeVoicePrefetchSlot) {
+				soundCache.makeLRU(slot, capacity);
+				nativeVoicePrefetchSlot = true;
+			}
+			if (soundCache.get(path))
+				continue;
+		}
+		if (nativePrefetchedVoices.size() >= capacity)
+			nativePrefetchedVoices.erase(nativePrefetchedVoices.begin());
+		nativePrefetchedVoices.push_back(path);
+		async.cacheSound(slot, path);
+	}
+}
+
+// seplay loads its SE with a synchronous dwaveload, decoding the Ogg each time
+// (its lookahead cache also needs object_caching). A d2 truth line passes the
+// script through seplay before its first text, so the voice runs ahead of the
+// text and lips for the whole decode. Keep the last few short SEs decoded;
+// the truth SEs repeat, so later lines start at once.
+void ONScripter::nativeKeepSoundEffect(int channel, const std::string &path) {
+	constexpr int slot = 0x7365, capacity = 4;
+	constexpr Uint32 maxBytes = 1024 * 1024; // about 5 s at 48 kHz stereo
+	if (path.size() < 10 || (skip_mode & (SKIP_NORMAL | SKIP_SUPERSKIP)) || keyState.ctrl)
+		return;
+	std::string prefix = path.substr(0, 9);
+	std::transform(prefix.begin(), prefix.end(), prefix.begin(), [](unsigned char c) {
+		return c == '\\' ? '/' : static_cast<char>(std::tolower(c));
+	});
+	auto &sample = wave_sample[channel];
+	if (prefix != "sound/se/" || !sample || !sample->chunk || sample->chunk->alen > maxBytes)
+		return;
+	Lock lock(&soundCache);
+	if (!nativeSoundEffectSlot) {
+		soundCache.makeLRU(slot, capacity);
+		nativeSoundEffectSlot = true;
+	}
+	soundCache.add(slot, path, sample);
+}
+
+// umiN_M, umiN_op, teatime_N and ura_teatime_N belong to episode N.
+static int nativeChapterEpisode(const char *chapter) {
+	const char *digits = std::strncmp(chapter, "umi", 3) == 0 ? chapter + 3 : std::strrchr(chapter, '_') + 1;
+	return std::atoi(digits);
+}
+
 // What `setlog 1,"",<name prefix>` does for the current line in the script's
 // generation pass (*text_tagsave with %no_log_gen = 1), done at the moment
 // the line is read instead. Capture at the page wait, before the script can
 // open the browser; mark_read can call this again without duplicating it.
-// Entries take the voices recorded
-// for the line by nativeRecordLineVoice and are not jump targets.
+// Entries take the voices recorded for the line by nativeRecordLineVoice.
+// Like setlog they are log jump targets unless %unjumpable (*nj) is set, and
+// the chapter heading they jump from is recorded too (see below).
 void ONScripter::nativeAppendLogEntry() {
-	if (!dlgCtrl.dialogueProcessingState.active || dlgCtrl.textPart.empty())
-		return; // chapter-title mark_read etc.: no dialogue line to record
+	// A log jump superskips from the chapter start to its target; the full
+	// log adds nothing there either (%no_log_gen = 0).
+	if (skip_mode & SKIP_SUPERSKIP)
+		return;
+	if (!dlgCtrl.dialogueProcessingState.active || dlgCtrl.textPart.empty()) {
+		// The mark_read of *new_chapter, *new_episode, *new_tea and *new_ura,
+		// called from the chapter label itself: their setlog in the full log.
+		const char *sub = current_label_info ? current_label_info->name : nullptr;
+		if (sub && !callStack.empty() &&
+		    (equalstr(sub, "new_chapter") || equalstr(sub, "new_episode") ||
+		     equalstr(sub, "new_tea") || equalstr(sub, "new_ura"))) {
+			LabelInfo *chapter = callStack.front().label;
+			if (chapter && nativeChapterLabel(script_h.getLabelIndex(chapter)) == chapter)
+				nativeAppendChapterEntry(chapter);
+		}
+		return; // no dialogue line to record
+	}
 
 	// textCommand records the dialogue's label before inline commands/menu
 	// subroutines change the script's current label or call stack.
 	const auto labelIndex = script_h.logState.currDialogueLabelIndex;
 
+	int32_t unjumpable_var = 0;
+	bool jumpable = !script_h.findNumAlias("unjumpable", &unjumpable_var) ||
+	                script_h.getVariableData(unjumpable_var).num == 0;
+
 	auto &entries = script_h.logState.logEntries;
-	if (!entries.empty() && entries.back().labelIndex == labelIndex)
+	if (!entries.empty() && entries.back().labelIndex == labelIndex) {
+		// *text_tagsave's mark_read: *ak may have set %unjumpable meanwhile.
+		if (!jumpable)
+			script_h.logState.dialogueData[labelIndex].jumpable = false;
 		return;
+	}
+
+	// After a load the log starts empty: put the chapter heading the full log
+	// would have first, when its choice vector size is known. Only episode 8
+	// makes choices, so elsewhere it is the current one; in episode 8 only
+	// before its first choice. Otherwise lines of this chapter cannot be
+	// jumped to (nativeLogJumpAvailable).
+	if (entries.empty()) {
+		LabelInfo *chapter = nativeChapterLabel(labelIndex);
+		if (chapter && script_h.getLabelIndex(chapter) != labelIndex &&
+		    (nativeChapterEpisode(chapter->name) != 8 || script_h.choiceState.choiceVector.empty()))
+			nativeAppendChapterEntry(chapter);
+	}
 
 	// *get_name: $cur_character -> stralias name_<id>, "non" = narration.
 	std::string text;
@@ -2043,8 +2189,13 @@ void ONScripter::nativeAppendLogEntry() {
 	script_h.logState.tmpVoiceGroupStarted = false;
 	script_h.logState.tmpVolume            = 100;
 	nativeLineVoiceLabel                 = 0xFFFFFFFF;
-	data.jumpable                          = false;
+	data.jumpable                          = jumpable;
 
+	nativePushLogEntry(labelIndex);
+}
+
+void ONScripter::nativePushLogEntry(uint32_t labelIndex) {
+	auto &entries     = script_h.logState.logEntries;
 	std::string index = std::to_string(entries.size());
 	LogEntry entry;
 	entry.labelIndex       = labelIndex;
@@ -2056,6 +2207,168 @@ void ONScripter::nativeAppendLogEntry() {
 	params.emplace_back(index);
 	params.emplace_back("log");
 	dataTrees[validTree(1)].setValue(params, index);
+}
+
+// The chapter label a line belongs to, as *log_jump finds it with past_label2:
+// its per-episode lists hold exactly the labels named like these.
+LabelInfo *ONScripter::nativeChapterLabel(uint32_t labelIndex) {
+	auto isChapter = [](const char *name) {
+		auto number = [](const char *p) {
+			if (*p < '0' || *p > '9') return false;
+			while (*p >= '0' && *p <= '9') p++;
+			return *p == '\0';
+		};
+		if (std::strncmp(name, "ura_teatime_", 12) == 0) return number(name + 12);
+		if (std::strncmp(name, "teatime_", 8) == 0) return number(name + 8);
+		if (std::strncmp(name, "umi", 3) != 0 || name[3] < '0' || name[3] > '9') return false;
+		const char *p = name + 3;
+		while (*p >= '0' && *p <= '9') p++;
+		return *p == '_' && (equalstr(p + 1, "op") || number(p + 1));
+	};
+	for (uint32_t i = labelIndex + 1; i-- > 0;) {
+		LabelInfo *label = script_h.getLabelByIndex(i);
+		if (label->name && isChapter(label->name))
+			return label;
+	}
+	return nullptr;
+}
+
+// The heading the full log has for a chapter, where *log_jump superskips
+// from: get_unique_log_entry_index gives its choice vector size. umiN_M call
+// *new_chapter, the others *new_episode, *new_tea or *new_ura.
+void ONScripter::nativeAppendChapterEntry(LabelInfo *chapter) {
+	auto str = [this](const char *alias) {
+		int32_t no = 0;
+		const char *value = script_h.findNumAlias(alias, &no) ? script_h.getVariableData(no).str : nullptr;
+		return std::string(value ? value : "");
+	};
+	auto labelIndex = script_h.getLabelIndex(chapter);
+	auto &entries   = script_h.logState.logEntries;
+	if (!entries.empty() && entries.back().labelIndex == labelIndex)
+		return;
+
+	std::string text;
+	const char *name = chapter->name;
+	if (std::strncmp(name, "umi", 3) == 0 && !std::strstr(name, "_op")) {
+		std::string time = str("chapter_time");
+		text             = time.empty() ? str("chapter_title") : time + "{n}" + str("chapter_title");
+	} else {
+		text = str("ep_id");
+	}
+
+	auto &data    = script_h.logState.dialogueData[labelIndex];
+	data.text     = text;
+	data.voices.clear();
+	data.volume   = 100;
+	data.jumpable = true;
+	nativePushLogEntry(labelIndex);
+}
+
+// *log_jump resolves the hovered entry with nearest_log and superskips from
+// its chapter heading's entry; check both exist before *log_jump_request asks,
+// as the script has no way back. The incremental log lacks the heading of a
+// chapter loaded into whose choice vector size is unknown (episode 8).
+bool ONScripter::nativeLogJumpAvailable() {
+	auto &log     = script_h.logState;
+	auto &entries = log.logEntries;
+	auto jumpable = [&log](uint32_t labelIndex) {
+		auto it = log.dialogueData.find(labelIndex);
+		return it != log.dialogueData.end() && it->second.jumpable;
+	};
+#ifdef ONS_VITA_FILE_LOGGING
+	auto fail = [&](const char *why) {
+		sendToLog(LogLevel::Warn, "Log jump unavailable: %s (hovered %ld, %u entries)\n", why,
+		          sprite_info[320].scrollableInfo.hoveredElement, static_cast<unsigned>(entries.size()));
+		for (size_t i = 0; i < entries.size(); i++) {
+			LabelInfo *label = script_h.getLabelByIndex(entries[i].labelIndex);
+			bool heading     = nativeChapterLabel(entries[i].labelIndex) == label;
+			if (heading || i + 4 > entries.size() ||
+			    std::labs(static_cast<long>(i) - sprite_info[320].scrollableInfo.hoveredElement) <= 3)
+				sendToLog(LogLevel::Warn, "  entry %u *%s%s jumpable %d cvs %u\n", static_cast<unsigned>(i),
+				          label->name, heading ? " (heading)" : "", jumpable(entries[i].labelIndex),
+				          static_cast<unsigned>(entries[i].choiceVectorSize));
+		}
+		return false;
+	};
+#else
+	auto fail = [](const char *) { return false; };
+#endif
+	// *log_jump: scrollable_get_hovered_elem %log_ch_next,320
+	const auto &si = sprite_info[320].scrollableInfo;
+	long target    = si.hoveredElement;
+	if (!si.isSpecialScrollable)
+		return fail("sprite 320 is not the log scrollable");
+	if (target < 0 || target >= static_cast<long>(entries.size()))
+		return fail("hovered element is not a log entry");
+	while (target >= 0 && !jumpable(entries[target].labelIndex))
+		target--;
+	if (target < 0)
+		return fail("no jumpable entry at or above the hovered one");
+
+	LabelInfo *chapter = nativeChapterLabel(entries[target].labelIndex);
+	if (!chapter)
+		return fail("no chapter label before the target");
+	// past_label2 only searches the chapters of %scenario_Number. Aliases are
+	// stored lowercase.
+	int32_t scenario_var = 0;
+	if (!script_h.findNumAlias("scenario_number", &scenario_var))
+		return fail("no scenario_number alias");
+	if (nativeChapterEpisode(chapter->name) != script_h.getVariableData(scenario_var).num)
+		return fail("chapter is not in %scenario_Number's episode");
+
+	auto chapterIndex = script_h.getLabelIndex(chapter);
+	for (long i = 0; i <= target; i++)
+		if (entries[i].labelIndex == chapterIndex)
+			return entries[i].choiceVectorSize <= entries[target].choiceVectorSize ||
+			       fail("chapter heading has a larger choice vector size");
+	return fail("chapter heading is not in the log");
+}
+
+// While skipping, the script's *load_voice returns at its jnskip before the
+// dwaveload that nativeRecordLineVoice watches, so skipped lines had no voice
+// to replay from the log. Record the file that dwaveload would have loaded,
+// without decoding it.
+void ONScripter::nativeRecordSkippedVoice() {
+	int32_t ch_var = 0, folder_var = 0, name_var = 0;
+	if (!script_h.findNumAlias("lv_ch", &ch_var) || !script_h.findNumAlias("lv_f", &folder_var) ||
+	    !script_h.findNumAlias("lv_v", &name_var))
+		return;
+	const char *folder = script_h.getVariableData(folder_var).str;
+	const char *name   = script_h.getVariableData(name_var).str;
+	if (!folder || !*folder || !name || !*name)
+		return;
+	// *load_voice's character voice disabler: %(8100 + folder) == 2 skips the load.
+	int32_t disabler = 8100 + std::atoi(folder);
+	if (disabler >= 0 && disabler < static_cast<int32_t>(VARIABLE_RANGE) &&
+	    script_h.getVariableData(disabler).num == 2)
+		return;
+	std::string path = std::string("sound\\voice\\") + folder + "\\" + name + ".ogg";
+	translatePathSlashes(path);
+	nativeRecordLineVoice(script_h.getVariableData(ch_var).num, path.c_str());
+}
+
+// *log_jump_execute's `clearlog 1,%log_dst_cvs` keeps the whole generated
+// episode. The incremental log resumes from the target line instead, which is
+// logged again when displayed: drop it and everything after it.
+void ONScripter::nativeTrimLogAtJumpTarget(StringTree &tree) {
+	int32_t next_var = 0;
+	if (!script_h.findNumAlias("log_ch_next", &next_var))
+		return;
+	const char *target = script_h.getVariableData(next_var).str;
+	if (!target || *target != '*' || !script_h.hasLabel(target + 1))
+		return;
+	auto labelIndex = script_h.getLabelIndex(script_h.lookupLabel(target + 1));
+	auto &entries   = script_h.logState.logEntries;
+	for (size_t i = entries.size(); i-- > 0;) {
+		if (entries[i].labelIndex != labelIndex)
+			continue;
+		for (size_t j = i; j < entries.size() && j < tree.insertionOrder.size(); j++)
+			tree.branches.erase(tree.insertionOrder[j]);
+		if (tree.insertionOrder.size() > i)
+			tree.insertionOrder.resize(i);
+		entries.resize(i);
+		break;
+	}
 }
 
 #endif

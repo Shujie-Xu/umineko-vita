@@ -28,6 +28,7 @@
 #include <string>
 #include <map>
 #include <cstdio>
+#include <cstring>
 
 void ONScripter::loadImageIntoCache(int id, const std::string &filename_str, bool allow_rgb) {
 	bool has_alpha;
@@ -110,11 +111,17 @@ SDL_Surface *ONScripter::loadImage(const char *filename, bool *has_alpha, bool a
 
 	if (!filename)
 		return nullptr;
+#ifdef VITA
+	nativeAwaitPrefetchedImage(filename);
+#endif
 
 	{
 		Lock lock(&imageCache);
 		std::shared_ptr<Wrapped_SDL_Surface> r = imageCache.get(filename);
 		if (r && r->surface) {
+#ifdef VITA
+			nativeConsumePrefetchedImage(filename);
+#endif
 			if (has_alpha)
 				*has_alpha = r->has_alpha;
 			if (!allow_rgb && r->surface->format->BitsPerPixel == 24) {
@@ -126,6 +133,13 @@ SDL_Surface *ONScripter::loadImage(const char *filename, bool *has_alpha, bool a
 			return r->surface;
 		}
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: a background or sprite body the lookahead did not
+	// have ready (the prefetch thread's own decodes also pass here).
+	if ((!std::strncmp(filename, "backgrounds/", 12) || (!std::strncmp(filename, "sprites/", 8) && std::strstr(filename, "/1/"))) &&
+	    !nativeReadingPrefetchedImage())
+		sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: miss\n", static_cast<unsigned>(SDL_GetTicks()), filename);
+#endif
 
 	SDL_Surface *tmp = nullptr;
 
@@ -315,13 +329,30 @@ SDL_Surface *ONScripter::createSurfaceFromFile(const char *filename) {
 
 	size_t length{0};
 	uint8_t *buffer{nullptr};
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	const auto readStart = SDL_GetTicks();
+#endif
 
+	bool prefetch{false};
 	if (filename[0]) {
-		Lock lock(&surfaceCreationLockVar);
-		script_h.reader->getFile(filename, length, &buffer);
+#ifdef VITA
+		// A lookahead prefetch decodes the file it read itself (pausing for
+		// script loads), so it never holds this lock.
+		prefetch = nativeTakePrefetchBuffer(length, &buffer);
+		if (!prefetch)
+#endif
+		{
+			Lock lock(&surfaceCreationLockVar);
+			script_h.reader->getFile(filename, length, &buffer);
+		}
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	const auto decodeStart = SDL_GetTicks();
+#endif
 
 	if (length == 0) {
+		if (prefetch)
+			return nullptr;
 		//don't complain about missing cursors
 		if (!equalstr(filename, "uoncur.bmp") &&
 		    !equalstr(filename, "uoffcur.bmp") &&
@@ -342,6 +373,10 @@ SDL_Surface *ONScripter::createSurfaceFromFile(const char *filename) {
 	const char *ext  = std::strrchr(filename, '.');
 	SDL_RWops *src   = SDL_RWFromMem(buffer, static_cast<int>(length));
 	SDL_Surface *tmp = nullptr;
+	if (prefetch && !src) { // Its allocations fail instead of spilling.
+		freearr(&buffer);
+		return nullptr;
+	}
 
 	if (ext && (equalstr(ext + 1, "PNG") || equalstr(ext + 1, "png"))) {
 		PNGLoader *loader = pngImageLoaderPool.getLoader();
@@ -351,7 +386,8 @@ SDL_Surface *ONScripter::createSurfaceFromFile(const char *filename) {
 		pngImageLoaderPool.giveLoader(loader);
 	}
 
-	if (!tmp) {
+	// A prefetch skips the fallback: it would hold the loader's lock.
+	if (!tmp && !prefetch) {
 		Lock lock(&surfaceCreationLockVar);
 		tmp = IMG_Load_RW(src, 0);
 		if (!tmp && ext && (equalstr(ext + 1, "JPG") || equalstr(ext + 1, "jpg"))) {
@@ -366,6 +402,15 @@ SDL_Surface *ONScripter::createSurfaceFromFile(const char *filename) {
 
 	freearr(&buffer);
 
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: the loader thread's share of an image load.
+	const auto decodeEnd = SDL_GetTicks();
+	if (decodeEnd - readStart >= 5)
+		sendToLog(LogLevel::Warn, "Timing %u: file %s: read %u ms (%u KiB), decode %u ms\n",
+		          static_cast<unsigned>(SDL_GetTicks()), filename,
+		          static_cast<unsigned>(decodeStart - readStart), static_cast<unsigned>(length / 1024),
+		          static_cast<unsigned>(decodeEnd - decodeStart));
+#endif
 #ifdef VITA
 	if (!menuKey.empty() && tmp) {
 		Lock lock(&surfaceCreationLockVar);

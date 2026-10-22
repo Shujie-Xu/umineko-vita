@@ -28,6 +28,9 @@ bool ONScripter::constantRefreshEffect(EffectLink *effect, bool clear_dirty_rect
 	}
 
 	//sendToLog(LogLevel::Info, "constantRefreshEffect start\n");
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	const auto timingStart = SDL_GetTicks();
+#endif
 
 	if (effect->effect == 15 || effect->effect == 18) {
 		if (!effect->anim.gpu_image) {
@@ -48,12 +51,25 @@ bool ONScripter::constantRefreshEffect(EffectLink *effect, bool clear_dirty_rect
 	effect_refresh_mode_src = refresh_mode_src;
 	effect_refresh_mode_dst = refresh_mode_dst;
 
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	const auto maskMs = SDL_GetTicks() - timingStart;
+#endif
+
 	if (!async) {
 		event_mode = IDLE_EVENT_MODE;
 		while (effect_current) {
 			waitEvent(0);
 		}
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: the time a print held the script, against the
+	// effect's scripted duration (the difference is setup and slow frames).
+	if (effect->effect > 1)
+		sendToLog(LogLevel::Warn, "Timing %u: effect %d (%d ms%s): mask setup %u ms, %s %u ms\n",
+		          static_cast<unsigned>(SDL_GetTicks()), effect->effect,
+		          effect->duration, async ? ", async" : "", static_cast<unsigned>(maskMs),
+		          async ? "returned after" : "finished after", static_cast<unsigned>(SDL_GetTicks() - timingStart));
+#endif
 
 	//sendToLog(LogLevel::Info, "constantRefreshEffect return\n");
 

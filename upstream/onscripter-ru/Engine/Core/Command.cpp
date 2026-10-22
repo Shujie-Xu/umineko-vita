@@ -1787,6 +1787,17 @@ int ONScripter::lspCommand() {
 			UpdateAnimPosXY(&anim);
 		}
 	}
+	// The enlarged backlog jump prompt must stay on screen: shrink a line too
+	// wide at full scale (longer translations) and render it once more.
+	if (VitaMenu::logJumpPrompt(menuLabel, no)) {
+		auto &anim = sprite_info[no];
+		const float fit = VitaMenu::fitScale(anim.native_menu_scale, anim.pos.w, window.script_width);
+		if (fit < anim.native_menu_scale) {
+			anim.native_menu_scale = fit;
+			anim.stale_image = true;
+			setupAnimationInfo(&anim, nullptr);
+		}
+	}
 #endif
 
 	if (is_reuseable) {
@@ -2758,7 +2769,18 @@ int ONScripter::dwaveCommand() {
 			fmt |= SOUND_PRELOAD;
 			channel_preloaded[ch] = true;
 		}
+#ifdef VITA
+		// Copied: playSoundThreaded runs events, which may reuse the string buffer.
+		const std::string path{buf};
+#endif
 		playSoundThreaded(buf, fmt, loop_flag, ch);
+#ifdef VITA
+		if (play_mode == WAVE_PRELOAD) {
+			nativeKeepSoundEffect(ch, path);
+			nativePrefetchVoices();
+			nativePrefetchAhead();
+		}
+#endif
 	}
 	if ((ch == 0) && bgmdownmode_flag && (play_mode != WAVE_PRELOAD))
 		setCurMusicVolume(music_volume);
@@ -3451,6 +3473,11 @@ void ONScripter::btnwaitCommandHandleResult(uint32_t button_timer_start, Variabl
 
 	script_h.setInt(resultVar, buttonState.button);
 	//sendToLog(LogLevel::Info, "btnwait return value: %d\n", buttonValue);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// -51 (Start/Z) and -70 (middle click) request a jump in the backlog.
+	if (current_label_info && current_label_info->name && equalstr(current_label_info->name, "log_button_loop"))
+		sendToLog(LogLevel::Warn, "Log jump: backlog button %d\n", buttonState.button);
+#endif
 
 	if (buttonState.button >= 1 && del_flag) {
 		btndef_info.remove();

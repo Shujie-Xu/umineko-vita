@@ -1,5 +1,6 @@
 #include "gpu_render_targets.h"
 #include <vitaGL.h>
+#include <psp2/kernel/threadmgr.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -86,6 +87,28 @@ __attribute__((noinline)) void ons_vita_finish_readback(void) {
         needs_scene_reset = 1;
     }
     sceGxmFinish(gxm_context);
+}
+
+/* vitaGL frees GPU memory lazily: each swap signals its garbage collector,
+ * which frees the oldest of FRAME_PURGE_FREQ (4) purge lists, so memory a
+ * frame released is reusable only after later frames are presented. A large
+ * texture allocated straight after a cache purge (moreram, then a credits
+ * strip) therefore finds the freed memory still queued. Once every submitted
+ * scene has completed, nothing on the GPU can still sample those lists, so
+ * run all four GC cycles without presenting; vitaGL's own
+ * gpu_alloc_mapped_aligned_unsafe() relies on the same completion guarantee. */
+extern SceUID gc_mutex[2];
+void ons_vita_reclaim_deferred_gpu_memory(void) {
+    enum { FRAME_PURGE_FREQ = 4 };
+    if (!gxm_context) return;
+    ons_vita_finish_readback();
+    for (int i = 0; i < FRAME_PURGE_FREQ; ++i) {
+        sceKernelWaitSema(gc_mutex[1], 1, NULL);
+        sceKernelSignalSema(gc_mutex[0], 1);
+    }
+    /* All cycles have finished once the pull semaphore is full again. */
+    sceKernelWaitSema(gc_mutex[1], FRAME_PURGE_FREQ, NULL);
+    sceKernelSignalSema(gc_mutex[1], FRAME_PURGE_FREQ);
 }
 
 void ons_vita_note_target_scene(const SceGxmRenderTarget *target) {

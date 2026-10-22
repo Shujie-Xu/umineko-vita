@@ -1,5 +1,6 @@
 #include "platform/vita/platform.hpp"
 #include "platform/vita/assets.hpp"
+#include "platform/vita/memory.hpp"
 #include "platform/vita/startup_image.hpp"
 #ifdef ONS_VITA_FIOS
 #include "platform/vita/sony_io.hpp"
@@ -25,6 +26,8 @@
 #endif
 
 // Reserve the remainder of the application budget for vitaGL/GXM allocations.
+// vitaGL's RAM pool takes all but 12 MiB of what is left (136 MiB measured), so
+// a larger heap shrinks that pool one for one; see memory.cpp for the budget.
 extern "C" {
 int _newlib_heap_size_user = 192 * 1024 * 1024;
 }
@@ -86,6 +89,9 @@ bool initialize() {
 	setvbuf(stdout, nullptr, _IOLBF, 0);
 	setvbuf(stderr, nullptr, _IONBF, 0);
 #endif
+	// Before SDL_Init, so SDL's allocations can overflow into vitaGL's pools.
+	VitaMemory::installSdlAllocator();
+	VitaMemory::logBudget("boot");
 	if (chdir(gameRoot()) != 0) {
 		std::fprintf(stderr, "Cannot open native game root %s: %s\n", gameRoot(), std::strerror(errno));
 		return false;

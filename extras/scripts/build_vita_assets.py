@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from native_asset_metadata import collect_dimensions, png_size, write_dimensions
 
 VITA_MAX_TEX = 2048
+JUMP_PREVIEW_SCALE = 0.875
 SKIP_DIRS = {"save", "onscripter-ru-osx.app"}
 SKIP_NAMES = {".DS_Store", "Thumbs.db"}
 AUDIO_KINDS = {"voice", "bgm", "se", "pam"}
@@ -72,7 +73,9 @@ def classify(rel: Path, ext: str, png_meta):
         w = png_meta.get("width", 0) if png_meta else 0
         h = png_meta.get("height", 0) if png_meta else 0
         if h > VITA_MAX_TEX or w > VITA_MAX_TEX:
-            if re.match(r"graphics/locale(?:_[^/]+)?/", p):
+            # Chapter-jump previews are 20-cell strips loaded with lbsp2, so
+            # they take the GPUBigImage path like the locale strips.
+            if re.match(r"graphics/(?:locale(?:_[^/]+)?|menu(?:_[^/]+)?/jump)/", p):
                 return "long_strip"
             if p.startswith("backgrounds/"):
                 return "background"
@@ -382,7 +385,13 @@ def plan_jobs(src_root: Path, out_root: Path, *, skip_audio: bool, scale: str):
         elif ext == ".png":
             if not png_meta:
                 continue
-            cmd = build_png_command(src, dst, kind, png_meta, scale)
+            png_scale = scale
+            if re.match(r"graphics/menu(?:_[^/]+)?/jump/ep", rel.as_posix().lower()):
+                # The chapter menu shows these 640x360 cells at 175%, i.e.
+                # 560x315 Vita pixels; 0.875 maps them 1:1 (exact 315px cells).
+                png_scale = f"{JUMP_PREVIEW_SCALE:.7f}"
+                meta["scale"] = JUMP_PREVIEW_SCALE
+            cmd = build_png_command(src, dst, kind, png_meta, png_scale)
         elif kind == "normal_video":
             ass = find_ass_for_video(rel, src_root)
             cmd = build_normal_video_command(src, dst, ass)
@@ -538,9 +547,10 @@ def main() -> int:
         src = Path(j["src_path"])
         dst = Path(j["dst_path"])
         # Rebuild legacy cropped strips even when their timestamp is newer.
+        strip_scale = j["meta"].get("scale", args.scale)
         strip_mismatch = j["kind"] == "long_strip" and png_size(dst) != (
-            max(2, int(j["meta"]["width"] * args.scale)),
-            max(2, int(j["meta"]["height"] * args.scale)),
+            max(2, int(j["meta"]["width"] * strip_scale)),
+            max(2, int(j["meta"]["height"] * strip_scale)),
         )
         if not args.force and not strip_mismatch and not needs_conversion(src, dst):
             continue

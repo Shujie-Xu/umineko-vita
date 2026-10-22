@@ -2527,6 +2527,15 @@ static GPU_Image* CreateImage(GPU_Renderer* renderer, Uint16 w, Uint16 h, GPU_Fo
             h = (Uint16)getNearestPowerOf2(h);
     }
 
+#ifdef VITA
+    /* vitaGL zero-fills a level-0 texture created without data
+     * (gpu_alloc_texture). The static zero buffer below would instead stay
+     * allocated at the size of the largest texture ever created (11.8 MB for a
+     * 960x4096 RGB credits tile, more for RGBA tiles) and upload zeros twice. */
+    (void)zero_buffer;
+    (void)zero_buffer_size;
+    glTexImage2D(GL_TEXTURE_2D, 0, internal_format, w, h, 0, internal_format, GL_UNSIGNED_BYTE, NULL);
+#else
     // Initialize texture using a blank buffer
     if(zero_buffer_size < (unsigned int)(w*h*result->bytes_per_pixel))
     {
@@ -2535,10 +2544,11 @@ static GPU_Image* CreateImage(GPU_Renderer* renderer, Uint16 w, Uint16 h, GPU_Fo
         zero_buffer = (unsigned char*)SDL_malloc(zero_buffer_size);
         memset(zero_buffer, 0, zero_buffer_size);
     }
-    
-    
+
+
     upload_new_texture(zero_buffer, GPU_MakeRect(0, 0, w, h), internal_format, 1, w, result->bytes_per_pixel);
-    
+#endif
+
     
     // Tell SDL_gpu what we got (power-of-two requirements have made this change)
     result->texture_w = w;

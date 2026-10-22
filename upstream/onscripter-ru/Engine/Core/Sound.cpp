@@ -24,6 +24,14 @@
 #endif
 
 #include <cstdio>
+#ifdef VITA
+#include <cstring>
+#include <malloc.h>
+#include <strings.h>
+#include <vitaGL.h>
+#include <psp2/kernel/threadmgr.h>
+#include "platform/vita/memory.hpp"
+#endif
 
 struct WAVE_HEADER {
 	char chunk_riff[4];
@@ -146,6 +154,10 @@ int ONScripter::trySoundCache(const char *filename, int format, bool loop_flag, 
 		{
 			Lock lock(&soundCache);
 			r = soundCache.get(filename);
+#ifdef VITA
+			if (r && channel != MIX_CACHE_CHANNEL_ASYNC && channel != MIX_CACHE_CHANNEL_BLOCK)
+				nativeConsumePrefetchedLoop(filename);
+#endif
 		}
 		// I hope shared_ptr is thread safe...
 		if (r && r->chunk) {
@@ -169,12 +181,27 @@ int ONScripter::playSoundThreaded(const char *filename, int format, bool loop_fl
 
 	//stop lipsEvent from being called, otherwise we will get lips broken due to loadLips calls in playSound -> playWave
 	skipLipsAction = true;
+#ifdef VITA
+	// A script load in flight: lookahead prefetch reads pause meanwhile.
+	struct ScriptLoad {
+		ONScripter &ons;
+		explicit ScriptLoad(ONScripter &o) : ons(o) { ons.nativeSoundLoads++; }
+		~ScriptLoad() {
+			ons.nativeScriptLoadEnd = SDL_GetTicks();
+			ons.nativeSoundLoads--;
+		}
+	} scriptLoad(*this);
+	nativeAwaitPrefetchedLoop(filename, waitevent);
+#endif
 
 	int cacheRet = trySoundCache(filename, format, loop_flag, channel);
 	if (cacheRet) {
 		skipLipsAction = false;
 		return cacheRet;
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	const auto waitStart = SDL_GetTicks();
+#endif
 
 	// set up the normal playSound call
 	async.playSound(filename, format, loop_flag, channel);
@@ -194,6 +221,14 @@ int ONScripter::playSoundThreaded(const char *filename, int format, bool loop_fl
 	auto r = reinterpret_cast<uintptr_t>(async.playSoundQueue.results.front());
 	async.playSoundQueue.results.pop_front();
 	SDL_AtomicUnlock(&async.playSoundQueue.resultsLock);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: how long the script stood still for this sound.
+	const auto waited = SDL_GetTicks() - waitStart;
+	if (waited >= 5)
+		sendToLog(LogLevel::Warn, "Timing %u: sound %s (channel %d): script waited %u ms\n",
+		          static_cast<unsigned>(SDL_GetTicks()), filename, channel,
+		          static_cast<unsigned>(waited));
+#endif
 
 	//enable lipsEvent
 	skipLipsAction = false;
@@ -223,12 +258,34 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 			return SOUND_NONE;
 	}
 
+#ifdef VITA
+	// The script sets mode_wave_demo, so every skipped line decodes its whole
+	// voice Ogg (Vorbis + resample to 48 kHz stereo) on the critical path, only
+	// for the next line to stop it. While skipping, load a silent chunk for
+	// voice files instead: dwaveplay still finds the channel loaded, and
+	// looping MEs/SEs (outside sound/voice) keep their real data.
+	if (((skip_mode & SKIP_NORMAL) || keyState.ctrl) && (format & SOUND_CHUNK) &&
+	    channel < ONS_MIX_CHANNELS && std::strlen(filename) > 12 &&
+	    !strncasecmp(filename, "sound", 5) && !strncasecmp(filename + 6, "voice", 5) &&
+	    (filename[5] == '\\' || filename[5] == '/') && (filename[11] == '\\' || filename[11] == '/')) {
+		// Whole frames for any mixer format, and enough for loadLips' first
+		// sample read; QuickLoad chunks never free this buffer.
+		alignas(8) static Uint8 silence[16]{};
+		Mix_Chunk *chunk = Mix_QuickLoad_RAW(silence, sizeof(silence));
+		if (chunk && playWave(std::make_shared<Wrapped_Mix_Chunk>(chunk), format, loop_flag, channel) == 0)
+			return SOUND_CHUNK;
+	}
+#endif
+
 	int cacheRet = trySoundCache(filename, format, loop_flag, channel);
 	if (cacheRet)
 		return cacheRet;
 
 	size_t length{0};
 	uint8_t *buffer{nullptr};
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	auto timingStart = SDL_GetTicks();
+#endif
 	{
 		Lock lock(&music_file_name);
 		// ------------- ^ ---------------------------------------------------------------------------
@@ -238,6 +295,19 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 		if (!script_h.reader->getFile(filename, length, &buffer))
 			return SOUND_NONE;
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: the sound thread's read and decode time per file.
+	const auto readMs = SDL_GetTicks() - timingStart;
+	timingStart += readMs;
+	auto logSoundTiming = [&](const char *stage, unsigned decodedKiB) {
+		const auto stageMs = SDL_GetTicks() - timingStart;
+		if (readMs + stageMs >= 5)
+			sendToLog(LogLevel::Warn, "Timing %u: sound %s (channel %d): read %u ms (%u KiB), %s %u ms (%u KiB)\n",
+			          static_cast<unsigned>(SDL_GetTicks()), filename,
+			          channel, static_cast<unsigned>(readMs), static_cast<unsigned>(length / 1024), stage,
+			          static_cast<unsigned>(stageMs), decodedKiB);
+	};
+#endif
 
 	if (length == 0)
 		return SOUND_NONE;
@@ -336,6 +406,9 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 		const long m_len = length - id3v2_size;
 
 		Mix_Music *music_info_local = Mix_LoadMUS_RW(SDL_RWFromMem(m_buf, static_cast<int>(m_len)), 0);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+		logSoundTiming("stream open", 0);
+#endif
 
 		if (music_info_local) {
 			if (match_bgm_audio_flag) {
@@ -448,9 +521,48 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 
 	if (format & SOUND_CHUNK) {
 		Mix_Chunk *chunk = Mix_LoadWAV_RW(SDL_RWFromMem(buffer, static_cast<int>(length)), 1);
+#ifdef VITA
+		const bool cacheOnly{channel == MIX_CACHE_CHANNEL_BLOCK || channel == MIX_CACHE_CHANNEL_ASYNC};
+		if (!chunk && cacheOnly) {
+			// Caching is optional; loadSoundIntoCache logs and carries on.
+			sendToLog(LogLevel::Error, "Could not decode %s for the sound cache: %s\n", filename, Mix_GetError());
+			freearr(&buffer);
+			return SOUND_NONE;
+		}
+		if (!chunk) {
+			// The whole Ogg is decoded to 48 kHz stereo and copied into one
+			// contiguous block (5.9 MiB for a 32 s 22 kHz mono ME), which a full
+			// or fragmented 192 MiB newlib heap may not have. Retry once
+			// without the decoded-sound cache and the lookahead prefetches
+			// before giving up.
+			{
+				Lock lock(&soundCache);
+				soundCache.clearAll();
+			}
+			nativeReleasePrefetches();
+			chunk = Mix_LoadWAV_RW(SDL_RWFromMem(buffer, static_cast<int>(length)), 1);
+		}
+#endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+		logSoundTiming("decode", chunk ? static_cast<unsigned>(chunk->alen / 1024) : 0);
+#endif
 		if (!chunk) {
 			char errBuf[MAX_ERRBUF_LEN];
+#ifdef VITA
+			// Release builds have no log file: put the memory state in the
+			// dialog so a screenshot tells heap exhaustion (little free) from
+			// fragmentation, and shows whether full vitaGL pools pushed
+			// textures into the newlib heap (vitaGL's use_extra_mem fallback).
+			struct mallinfo mi = mallinfo();
+			std::snprintf(errBuf, MAX_ERRBUF_LEN,
+			              "error playing sound '%s': %s (heap used %lu KiB, free %lu KiB; GL free RAM %lu KiB, VRAM %lu KiB)\n",
+			              filename, Mix_GetError(), static_cast<unsigned long>(mi.uordblks / 1024),
+			              static_cast<unsigned long>(mi.fordblks / 1024),
+			              static_cast<unsigned long>(vglMemFree(VGL_MEM_RAM) / 1024),
+			              static_cast<unsigned long>(vglMemFree(VGL_MEM_VRAM) / 1024));
+#else
 			std::snprintf(errBuf, MAX_ERRBUF_LEN, "error playing sound '%s': %s\n", filename, Mix_GetError());
+#endif
 			freearr(&buffer);
 			errorAndExit(errBuf);
 			return SOUND_NONE; //dummy
@@ -857,3 +969,215 @@ void setupWaveHeader(uint8_t *buffer, int channels, int bits,
 	}
 	std::memcpy(buffer + sizeof(header) + extra_bytes, &data_header, sizeof(data_header));
 }
+
+#ifdef VITA
+// The next meplay loop, decoded ahead (see nativePrefetchAhead in
+// Animation.cpp). dwaveload decodes a whole Ogg to the mixer format before
+// the script continues: ~30 s 22 kHz mono loops become 5-13 MB of 48 kHz
+// stereo PCM, which takes the Vita most of a second right before the
+// transition that should start with the loop. Loops up to 6.5 MiB qualify.
+
+// Decoded size of an Ogg Vorbis file in the mixer's format, from its headers,
+// or 0 if it is not one we can tell.
+static uint64_t nativeOggPcmBytes(const uint8_t *data, size_t length) {
+	const uint8_t *id = nullptr;
+	for (size_t i = 0; i + 16 <= length && i < 256 && !id; i++)
+		if (data[i] == 1 && !std::memcmp(data + i + 1, "vorbis", 6))
+			id = data + i;
+	if (!id)
+		return 0;
+	const uint32_t rate = id[12] | (id[13] << 8) | (id[14] << 16) | (static_cast<uint32_t>(id[15]) << 24);
+	// The last page's granule position is the stream's length in samples.
+	int64_t samples = -1;
+	for (size_t i = length >= 14 ? length - 14 : 0; i > 0 && samples < 0; i--) {
+		if (std::memcmp(data + i, "OggS", 4) || data[i + 4] != 0)
+			continue;
+		uint64_t granule = 0;
+		for (int b = 7; b >= 0; b--) granule = (granule << 8) | data[i + 6 + b];
+		samples = static_cast<int64_t>(granule);
+	}
+	int freq{0}, channels{0};
+	Uint16 format{0};
+	if (!rate || samples <= 0 || !Mix_QuerySpec(&freq, &format, &channels))
+		return 0;
+	return static_cast<uint64_t>(samples) * static_cast<uint64_t>(freq) / rate * static_cast<uint64_t>(channels) *
+	       (SDL_AUDIO_BITSIZE(format) / 8);
+}
+
+void ONScripter::nativeQueueLoopPrefetch(const std::string &file) {
+	using State = NativePrefetch::State;
+	if (!audio_open_flag)
+		return;
+	Lock cacheLock(&soundCache);
+	auto &entry = nativeLoopPrefetch;
+	if (!nativeLoopPrefetchSlot) {
+		soundCache.makeLRU(entry.slot, 1);
+		nativeLoopPrefetchSlot = true;
+	}
+	Lock lock(&nativeLoopPrefetch);
+	if (entry.file == file && (entry.state == State::Queued || entry.state == State::Decoding ||
+	                           (entry.state == State::Ready && soundCache.get(file))))
+		return;
+	if (entry.state == State::Decoding || soundCache.get(file))
+		return;
+	soundCache.clear(entry.slot); // A loop the script did not play after all.
+	entry.file  = file;
+	entry.state = State::Queued;
+	// On the image cache thread with the picture prefetches: one prefetch at
+	// a time, and the sound cache thread stays free for voice prefetches.
+	async.cacheImage(entry.slot, file, false);
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: queued\n", static_cast<unsigned>(SDL_GetTicks()), file.c_str());
+#endif
+}
+
+// The loop's LoadImageCacheInstruction (nativeRunImagePrefetch), on the image
+// cache thread. Decodes as playSound decodes a chunk, but with the file read
+// in pieces that pause for script loads and with soft allocations.
+bool ONScripter::nativeRunLoopPrefetch(const std::string &file) {
+	using State = NativePrefetch::State;
+	// Peak sound addition: one loop (umilse_012, 35 s, is 6.5 MiB decoded).
+	constexpr uint64_t maxBytes = 6656 * 1024;
+	auto &entry = nativeLoopPrefetch;
+	SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
+	while (nativePrefetchShouldYield() && !async.threadShutdownRequested)
+		SDL_Delay(5);
+	if (!nativeBeginPrefetch(entry, &nativeLoopPrefetch, file))
+		return true;
+
+#if defined(ONS_VITA_FILE_LOGGING)
+	const auto decodeStart = SDL_GetTicks();
+#endif
+	const unsigned epoch = nativePrefetchEpoch;
+	uint64_t pcmBytes{0};
+	std::shared_ptr<Wrapped_Mix_Chunk> chunk;
+	// From here on allocations fail (nullptr / std::bad_alloc) instead of
+	// spilling into vitaGL's pools or reaching the fatal new-handler.
+	VitaMemory::SoftAllocations soft;
+	{
+		Mix_Chunk *decoded{nullptr};
+		try {
+			size_t length{0};
+			std::unique_ptr<FILE, int (*)(FILE *)> fp(nativePrefetchOpen(file, 2 * 1024 * 1024, length), std::fclose);
+			std::unique_ptr<uint8_t[]> buffer;
+			if (fp && nativePrefetchMemoryOk(length + 1024 * 1024, length)) {
+				buffer.reset(new (std::nothrow) uint8_t[length]);
+				if (buffer && !nativePrefetchRead(fp.get(), buffer.get(), length))
+					buffer.reset();
+			}
+			fp.reset();
+			if (buffer)
+				pcmBytes = nativeOggPcmBytes(buffer.get(), length);
+			// SDL_mixer holds up to about twice the PCM while it assembles it.
+			if (pcmBytes && pcmBytes <= maxBytes &&
+			    nativePrefetchMemoryOk(2 * pcmBytes + length + 1024 * 1024, static_cast<size_t>(pcmBytes))) {
+				decoded = Mix_LoadWAV_RW(SDL_RWFromMem(buffer.get(), static_cast<int>(length)), 1);
+				if (decoded)
+					chunk = std::make_shared<Wrapped_Mix_Chunk>(decoded);
+			}
+		} catch (const std::bad_alloc &) {
+			if (decoded && !chunk)
+				Mix_FreeChunk(decoded); // Out of memory: skip, as if never queued.
+		} catch (...) {
+			Lock lock(&nativeLoopPrefetch);
+			entry.state  = State::Empty;
+			entry.thread = 0;
+			entry.file.clear();
+			throw;
+		}
+	}
+
+	bool ready{false};
+	{
+		Lock cacheLock(&soundCache);
+		// nativeReleasePrefetches may have run meanwhile: then drop it.
+		if (chunk && epoch == nativePrefetchEpoch && !soundCache.get(file)) {
+			try {
+				soundCache.add(entry.slot, file, chunk);
+				ready = true;
+			} catch (const std::bad_alloc &) {
+			}
+		}
+		Lock lock(&nativeLoopPrefetch);
+		entry.state  = ready ? State::Ready : State::Empty;
+		entry.thread = 0;
+		if (!ready)
+			entry.file.clear();
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: %s after %u ms (%u KiB decoded)\n",
+	          static_cast<unsigned>(SDL_GetTicks()), file.c_str(), ready ? "decoded" : "dropped",
+	          static_cast<unsigned>(SDL_GetTicks() - decodeStart), static_cast<unsigned>(pcmBytes / 1024));
+#endif
+	return true;
+}
+
+// playSoundThreaded, before its cache lookup: a queued prefetch of this file
+// is dropped (this load decodes it now); one being decoded is awaited at this
+// thread's priority, as finishing it takes less time than starting over.
+void ONScripter::nativeAwaitPrefetchedLoop(const char *file, bool waitevent) {
+	using State    = NativePrefetch::State;
+	auto &entry    = nativeLoopPrefetch;
+	const int self = sceKernelGetThreadId();
+	bool boosted{false};
+#if defined(ONS_VITA_FILE_LOGGING)
+	const auto waitStart = SDL_GetTicks();
+#endif
+	while (true) {
+		{
+			Lock lock(&nativeLoopPrefetch);
+			if (entry.file != file || entry.state == State::Empty || entry.state == State::Ready || entry.thread == self)
+				break;
+			if (entry.state == State::Queued) {
+				entry.state = State::Empty;
+				entry.file.clear();
+#if defined(ONS_VITA_FILE_LOGGING)
+				sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: still queued, loading it now\n",
+				          static_cast<unsigned>(SDL_GetTicks()), file);
+#endif
+				break;
+			}
+			if (!boosted) {
+				nativePrefetchAwaited = true; // Its reads stop pausing for this load.
+				sceKernelChangeThreadPriority(entry.thread, sceKernelGetThreadCurrentPriority());
+				boosted = true;
+				preventExit(true);
+			}
+		}
+		if (waitevent) {
+			event_mode = IDLE_EVENT_MODE;
+			Lock lock(&playSoundThreadedLock);
+			waitEvent(0);
+		} else {
+			SDL_Delay(1);
+		}
+	}
+	if (boosted) {
+		preventExit(false);
+#if defined(ONS_VITA_FILE_LOGGING)
+		sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: waited %u ms for its decode\n",
+		          static_cast<unsigned>(SDL_GetTicks()), file, static_cast<unsigned>(SDL_GetTicks() - waitStart));
+#endif
+	}
+}
+
+// trySoundCache found the file cached for a real channel, holding
+// soundCache's lock. The loop is handed over once: the channel now holds the
+// only reference, so the PCM goes when the loop stops, as without prefetching.
+void ONScripter::nativeConsumePrefetchedLoop(const char *file) {
+	using State = NativePrefetch::State;
+	auto &entry = nativeLoopPrefetch;
+	Lock lock(&nativeLoopPrefetch);
+	// Decoding: cached already, the state not yet updated.
+	if (entry.file != file || (entry.state != State::Ready && entry.state != State::Decoding))
+		return;
+	soundCache.clear(entry.slot);
+	if (entry.state == State::Ready) {
+		entry.state = State::Empty;
+		entry.file.clear();
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: hit\n", static_cast<unsigned>(SDL_GetTicks()), file);
+#endif
+}
+#endif

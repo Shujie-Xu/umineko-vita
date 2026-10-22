@@ -1505,6 +1505,48 @@ private:
 	void commitVisualState();
 	void buildGPUImage(AnimationInfo &ai);
 	void freeRedundantSurfaces(AnimationInfo &ai);
+#ifdef VITA
+	bool buildStreamedBigImage(AnimationInfo &ai);
+	bool reuseOutgoingImage(AnimationInfo &ai);
+	// Lookahead decoding of the next background, sprites and meplay loop
+	// (Animation.cpp, Sound.cpp). Each entry is a one-entry cache slot; its
+	// fields are guarded by Lock(&nativeImagePrefetch) or
+	// Lock(&nativeLoopPrefetch), always taken after the cache's own lock.
+	struct NativePrefetch {
+		enum class State { Empty, Queued, Decoding, Ready };
+		int slot;
+		std::string file;
+		State state{State::Empty};
+		int thread{0}; // SceUID of the decoding thread
+	};
+	NativePrefetch nativeImagePrefetch[3]{{0x7062}, {0x7063}, {0x7064}}; // background, two sprites
+	NativePrefetch nativeLoopPrefetch{0x6d65};
+	bool nativeImagePrefetchSlots{false}, nativeLoopPrefetchSlot{false};
+	const char *nativePrefetchScanStart{nullptr};
+	std::atomic<int> nativeImageLoads{0}, nativeSoundLoads{0}; // script loads in flight
+	std::atomic<uint32_t> nativeScriptLoadEnd{0};
+	std::atomic<bool> nativePrefetchAwaited{false};
+	std::atomic<unsigned> nativePrefetchEpoch{0};
+	uint8_t *nativePrefetchBuffer{nullptr}; // prefetch thread only
+	size_t nativePrefetchLength{0};
+	void nativePrefetchAhead();
+	bool nativePrefetchMemoryOk(size_t total = 0, size_t largest = 0);
+	bool nativePrefetchShouldYield();
+	FILE *nativePrefetchOpen(const std::string &file, size_t maxBytes, size_t &length);
+	bool nativePrefetchRead(FILE *fp, uint8_t *data, size_t length);
+	bool nativeBeginPrefetch(NativePrefetch &entry, void *guard, const std::string &file);
+	void nativeReleasePrefetches();
+	void nativeQueueImagePrefetch(const std::string &background, bool backgroundRgb, const std::vector<std::string> &sprites);
+	bool nativeRunImagePrefetch(int slot, const std::string &file, bool allow_rgb);
+	bool nativeReadingPrefetchedImage();
+	bool nativeTakePrefetchBuffer(size_t &length, uint8_t **buffer);
+	void nativeAwaitPrefetchedImage(const char *file);
+	void nativeConsumePrefetchedImage(const char *file);
+	void nativeQueueLoopPrefetch(const std::string &file);
+	bool nativeRunLoopPrefetch(const std::string &file);
+	void nativeAwaitPrefetchedLoop(const char *file, bool waitevent);
+	void nativeConsumePrefetchedLoop(const char *file);
+#endif
 	void setupAnimationInfo(AnimationInfo *anim, Fontinfo *info = nullptr);
 	void postSetupAnimationInfo(AnimationInfo *anim);
 	void buildAIImage(AnimationInfo *anim);
@@ -1605,7 +1647,18 @@ private:
 #ifdef VITA
 	friend void nativeAdoptBundledFontCaches();
 	void nativeAppendLogEntry();
+	void nativePushLogEntry(uint32_t labelIndex);
+	LabelInfo *nativeChapterLabel(uint32_t labelIndex);
+	void nativeAppendChapterEntry(LabelInfo *chapter);
+	bool nativeLogJumpAvailable();
+	void nativeTrimLogAtJumpTarget(StringTree &tree);
+	void nativeRecordSkippedVoice();
 	void nativeRecordLineVoice(int channel, const char *file);
+	void nativePrefetchVoices();
+	std::vector<std::string> nativePrefetchedVoices;
+	bool nativeVoicePrefetchSlot{false};
+	void nativeKeepSoundEffect(int channel, const std::string &path);
+	bool nativeSoundEffectSlot{false};
 	void nativeClearPendingLogVoice();
 	uint32_t nativeLineVoiceLabel{0xFFFFFFFF};
 	int nativeConfirmButton();
@@ -1620,6 +1673,7 @@ private:
 	void nativePrefilterKey(SDL_Event &event);
 	bool nativePendingTextKeyFresh();
 	bool nativeTitleHoverSeeded{false};
+	bool nativeLogJumpHoverSeeded{false};
 	uint32_t nativeDirectSaveUntil{0};
 	bool nativeDirectSaveActive{false};
 	SDL_Scancode nativePendingTextKey{SDL_SCANCODE_UNKNOWN};

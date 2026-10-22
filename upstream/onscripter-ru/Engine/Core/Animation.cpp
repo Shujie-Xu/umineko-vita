@@ -14,9 +14,19 @@
 #include "Support/FileIO.hpp"
 #include "Support/TextImageGeometry.hpp"
 #ifdef VITA
+#include "Engine/Readers/Base.hpp"
 #include "platform/vita/assets.hpp"
+#include "platform/vita/memory.hpp"
+extern "C" {
+#include "platform/vita/png_stream.h"
+extern int _newlib_heap_size_user; // platform.cpp
+}
+#include <psp2/kernel/threadmgr.h>
+#include <malloc.h>
 #endif
 
+#include <cstring>
+#include <memory>
 #include <unistd.h>
 
 int ONScripter::proceedAnimation() {
@@ -196,6 +206,12 @@ void ONScripter::setupAnimationInfo(AnimationInfo *anim, Fontinfo *info) {
 	auto st = SDL_GetTicks();
 	anim->deleteImage();
 	anim->abs_flag = true;
+#ifdef VITA
+	// Real loads come first: a big image or streamed strip, or any load once
+	// newlib has had to spill into vitaGL's pools, gets the prefetch memory.
+	if ((anim->is_big_image && anim->trans_mode != AnimationInfo::TRANS_STRING) || VitaMemory::spilledBytes())
+		nativeReleasePrefetches();
+#endif
 
 	if (anim->trans_mode == AnimationInfo::TRANS_STRING) {
 		Fontinfo f_info = info ? *info : sentence_font;
@@ -287,7 +303,14 @@ void ONScripter::setupAnimationInfo(AnimationInfo *anim, Fontinfo *info) {
 		//pos w&h already screen-size
 		anim->calculateImage(anim->pos.w, anim->pos.h);
 		//anim->fill(0, 0, 0, 0);
-	} else {
+	} else
+#ifdef VITA
+	    if (!reuseOutgoingImage(*anim) && !buildStreamedBigImage(*anim))
+#endif
+	{
+#ifdef VITA
+		nativeImageLoads++; // Lookahead prefetches start only between script loads.
+#endif
 		async.loadImage(anim);
 		// Wait in loop (like crEffect) until we are loaded
 		// detect events from during image loading & resizing, but without any image refresh (esp. if trapping)
@@ -298,8 +321,24 @@ void ONScripter::setupAnimationInfo(AnimationInfo *anim, Fontinfo *info) {
 			waitEvent(0);
 		preventExit(false);
 		event_mode = old_event_mode;
+#ifdef VITA
+		nativeScriptLoadEnd = SDL_GetTicks();
+		nativeImageLoads--;
+#endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+		const auto decoded = SDL_GetTicks();
+#endif
 		buildGPUImage(*anim);
 		freeRedundantSurfaces(*anim);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+		// Diagnostic builds: how long the script stood still for this image,
+		// waiting for the loader thread (read + decode), then uploading it.
+		const auto uploaded = SDL_GetTicks();
+		if (uploaded - st >= 5)
+			sendToLog(LogLevel::Warn, "Timing %u: image %s: decode wait %u ms, upload %u ms\n",
+			          static_cast<unsigned>(SDL_GetTicks()), anim->file_name,
+			          static_cast<unsigned>(decoded - st), static_cast<unsigned>(uploaded - decoded));
+#endif
 	}
 #ifdef VITA
 	// Change logical dimensions once per freshly built image. Physical pixels
@@ -325,6 +364,11 @@ void ONScripter::setupAnimationInfo(AnimationInfo *anim, Fontinfo *info) {
 	anim->stale_image     = false;
 	anim->exists          = true;
 	anim->deferredLoading = false;
+#ifdef VITA
+	if (anim->type == SPRITE_LSP2 && anim->trans_mode != AnimationInfo::TRANS_STRING &&
+	    anim->trans_mode != AnimationInfo::TRANS_LAYER)
+		nativePrefetchAhead();
+#endif
 
 	internal_slowdown_counter += SDL_GetTicks() - st;
 }
@@ -1212,6 +1256,27 @@ void ONScripter::drawBigImage(GPU_Target *target, AnimationInfo *info, int /*ref
 		allowDirectCopy = true;
 
 	auto chunks = info->big_image->getImagesForArea(sourceClip);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	{
+		// Diagnostic builds: the first draws of each big image, then one per
+		// ~2 s at 60 fps, with everything the clip and tile choice depend on.
+		static const GPUBigImage *lastImage{nullptr};
+		static unsigned draws{0};
+		if (info->big_image.get() != lastImage) {
+			lastImage = info->big_image.get();
+			draws     = 0;
+		}
+		if (draws < 3 || draws % 120 == 0)
+			sendToLog(LogLevel::Warn,
+			          "BigImage draw %u: %ux%u pos %.0f,%.0f %.0fx%.0f bounds %.0f,%.0f %.0fx%.0f scale %.2f,%.2f "
+			          "source %.0f,%.0f %.0fx%.0f target %.0f,%.0f %.0fx%.0f trans %d copy %d chunks %u%s\n",
+			          draws, info->big_image->w, info->big_image->h, info->pos.x, info->pos.y, info->pos.w, info->pos.h,
+			          bounding_rect.x, bounding_rect.y, bounding_rect.w, bounding_rect.h, scale_x, scale_y,
+			          sourceClip.x, sourceClip.y, sourceClip.w, sourceClip.h, targetClip.x, targetClip.y, targetClip.w,
+			          targetClip.h, info->trans, allowDirectCopy, static_cast<unsigned>(chunks.size()), centre_coordinates ? "" : " uncentred");
+		++draws;
+	}
+#endif
 	for (auto &chunk : chunks) {
 		float x = chunk.second.x + chunk.first->w / 2.0;
 		float y = chunk.second.y + chunk.first->h / 2.0;
@@ -1675,6 +1740,592 @@ void ONScripter::buildGPUImage(AnimationInfo &ai) {
 #endif
 	}
 }
+
+#ifdef VITA
+// A 960x14808 RGB credits strip decodes to 42.6 MB, plus its 7.7 MB file, at
+// the end of a session whose memory is fragmented; the async loader cannot get
+// such blocks. Decode suitable big images row by row from the file instead,
+// one tile-high band at a time, and upload each band's tiles before decoding
+// the next: at most one band (5.9 MB for that strip) is ever in CPU memory.
+// Only images whose surface freeRedundantSurfaces drops after the upload are
+// eligible (opaque :c, one cell, at least screen-sized), so no later code can
+// miss image_surface. Returns false, having changed nothing, to use the
+// regular path.
+bool ONScripter::buildStreamedBigImage(AnimationInfo &ai) {
+	if (!ai.is_big_image || ai.trans_mode != AnimationInfo::TRANS_COPY || ai.num_of_cells != 1 || !ai.file_name)
+		return false;
+	const char *filename = ai.file_name;
+	const char *ext      = std::strrchr(filename, '.');
+	if (filename[0] == '>' || filename[0] == '*' || !ext || !(equalstr(ext + 1, "PNG") || equalstr(ext + 1, "png")))
+		return false;
+	{
+		Lock lock(&imageCache);
+		if (imageCache.get(filename))
+			return false; // Already decoded: the regular path costs nothing extra.
+	}
+
+	std::unique_ptr<char[]> path(script_h.reader->completePath(filename, FileType::File));
+	if (!path)
+		return false;
+	std::unique_ptr<FILE, int (*)(FILE *)> fp(FileIO::openFile(path.get(), "rb"), std::fclose);
+	if (!fp)
+		return false;
+	uint32_t width{0}, height{0};
+	std::unique_ptr<OnsVitaPngStream, void (*)(OnsVitaPngStream *)> png(ons_vita_png_open(fp.get(), &width, &height),
+	                                                                   ons_vita_png_close);
+	if (!png || width > UINT16_MAX || height > UINT16_MAX)
+		return false;
+	const auto logical = VitaAssets::logicalImageSize(filename, static_cast<int>(width), static_cast<int>(height));
+	if (logical.width < window.script_width || logical.height < window.script_height)
+		return false;
+	const uint32_t bandRows = std::min<uint32_t>(height, static_cast<uint32_t>(GPUBigImage::tileLimit()));
+	std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)> band(
+	    SDL_CreateRGBSurface(SDL_SWSURFACE, static_cast<int>(width), static_cast<int>(bandRows), 24,
+	                         0x0000FF, 0x00FF00, 0xFF0000, 0),
+	    SDL_FreeSurface);
+	if (!band) {
+		sendToLog(LogLevel::Error, "Streamed big image %s: no memory for a %ux%u band\n", filename,
+		          static_cast<unsigned>(width), static_cast<unsigned>(bandRows));
+		return false;
+	}
+
+	// From here on this replaces loadImage + setSurface + buildGPUImage +
+	// freeRedundantSurfaces for this sprite.
+	if (filelog_flag)
+		script_h.findAndAddLog(script_h.log_info[ScriptHandler::FILE_LOG], filename, true);
+	ai.calculateImage(static_cast<int>(width), static_cast<int>(height));
+	ai.orig_pos.w = logical.width;
+	ai.orig_pos.h = logical.height;
+	ai.pos.w      = logical.width;
+	ai.pos.h      = logical.height;
+	ai.big_image.reset();
+	if (ai.gpu_image) {
+		gpu.freeImage(ai.gpu_image);
+		ai.gpu_image = nullptr;
+	}
+
+	auto big = std::make_shared<GPUBigImage>(static_cast<uint16_t>(width), static_cast<uint16_t>(height), 3,
+	                                         GPUBigImage::Streamed{});
+	for (uint32_t y = 0; y < height; y += bandRows) {
+		const uint32_t rows = std::min(bandRows, height - y);
+		if (ons_vita_png_read_rows(png.get(), static_cast<unsigned char *>(band->pixels), band->pitch, rows) != 0) {
+			// Keep the tiles decoded so far; the rest of the image stays empty.
+			sendToLog(LogLevel::Error, "Streamed big image %s: decoding failed at row %u\n", filename,
+			          static_cast<unsigned>(y));
+			break;
+		}
+		big->addBand(band.get(), y);
+	}
+	big->setVirtualResolution(ai.orig_pos.w, ai.orig_pos.h);
+	ai.big_image = big;
+	return true;
+}
+
+// lbg and lss begin with csp_slot, so showing the picture a slot already shows
+// (Umineko redraws the current background with "lbg" to clear its characters
+// through a transition) frees it and then reads and decodes the same PNG again
+// while the screen stands still (a 1 MB PNG took 0.6 s to read and decode in
+// the 2026-10-07 device probe). Stock releases hide this with the script's
+// object cache, which the Vita leaves off. The pre-transition copy that
+// backupState took still holds
+// that upload until the next print; share it by reference, exactly as that
+// copy does. Returns false, having changed nothing, to load normally.
+bool ONScripter::reuseOutgoingImage(AnimationInfo &ai) {
+	const AnimationInfo *old = ai.old_ai;
+	if (!old || ai.type != SPRITE_LSP2 || !ai.file_name || old->stale_image || old->deferredLoading ||
+	    ai.trans_mode == AnimationInfo::TRANS_STRING || ai.trans_mode == AnimationInfo::TRANS_LAYER ||
+	    ai.is_big_image != old->is_big_image ||
+	    !(ai.is_big_image ? old->big_image != nullptr : old->gpu_image != nullptr) || !treatAsSameImage(ai, *old))
+		return false;
+
+	ai.big_image     = old->big_image;
+	ai.gpu_image     = old->gpu_image;
+	ai.image_surface = old->image_surface;
+	if (ai.gpu_image)
+		ai.gpu_image->refcount++;
+	if (ai.image_surface)
+		ai.image_surface->refcount++;
+	// The fields a fresh load derives from the image (calculateImage/setSurface).
+	ai.orig_pos.w = old->orig_pos.w;
+	ai.orig_pos.h = old->orig_pos.h;
+	ai.pos.w      = old->pos.w;
+	ai.pos.h      = old->pos.h;
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn, "Timing %u: image %s: reused the outgoing upload\n",
+	          static_cast<unsigned>(SDL_GetTicks()), ai.file_name);
+#endif
+	return true;
+}
+
+// Stock Umineko hides most picture decoding behind its object cache: every
+// lbg/lss looks ahead in the script (exbg/exsp) and decodes what comes next on
+// a cache thread. The Vita leaves that off, as its slots (9 backgrounds, 15
+// sprites, 25+25 sounds) do not fit the heap, so each new picture is read and
+// decoded while the screen stands still (0.5 s for a background). Do the same
+// for the next background and the next two sprites only, plus the next meplay
+// loop (Sound.cpp), each in a one-entry slot that its first use empties again.
+// Pictures the script shows beyond those load exactly as before: prefetches
+// run one at a time at low priority, start and read only while the script is
+// not loading, and never hold the loader's locks. Memory (see also
+// nativeReleasePrefetches): at most a 4 MiB background, two 2.5 MiB sprites
+// and one 6.5 MiB loop, allocated only with 24 MiB of the heap to spare
+// beyond the job, never from vitaGL's pools, and failing softly. Runs after
+// lsp2 loads and voice loads, never while skipping.
+void ONScripter::nativePrefetchAhead() {
+	constexpr size_t scanLimit = 16 * 1024;
+	if ((skip_mode & (SKIP_NORMAL | SKIP_SUPERSKIP)) || keyState.ctrl || callStack.empty() ||
+	    !callStack.front().next_script)
+		return;
+	// Where the script's lookahead starts: the main script past this line.
+	const char *start = callStack.front().next_script;
+	if (start == nativePrefetchScanStart)
+		return; // A line's lsp2 and voice loads all look from the same place.
+	nativePrefetchScanStart = start;
+	auto offset = script_h.getOffset(start);
+	auto length = script_h.getScriptLength();
+	if (offset < 0 || static_cast<size_t>(offset) >= length)
+		return;
+	const char *end = start + std::min(length - static_cast<size_t>(offset), scanLimit);
+
+	auto literal = [end](const char *&q, const char *text) {
+		const char *r = q;
+		for (; *text; text++, r++)
+			if (r >= end || *r != *text)
+				return false;
+		q = r;
+		return true;
+	};
+	auto token = [end](const char *&q, bool (*accept)(char)) {
+		const char *s = q;
+		while (q < end && accept(*q)) q++;
+		return std::string(s, q);
+	};
+	bool (*name)(char)  = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_'; };
+	bool (*digit)(char) = [](char c) { return c >= '0' && c <= '9'; };
+	// lbg/lss on a slot that already shows that picture reuse it (reuseOutgoingImage).
+	auto shown = [this](const std::string &slot, const std::string &file) {
+		int32_t no{-1};
+		if (!script_h.findNumAlias(slot.c_str(), &no) || no < 0 || no >= MAX_SPRITE_NUM)
+			return false;
+		const AnimationInfo &ai = sprite2_info[no];
+		return ai.file_name && file == ai.file_name && !ai.stale_image && (ai.gpu_image || ai.big_image);
+	};
+
+	std::string background, loop;
+	bool backgroundRgb{false};
+	std::vector<std::string> sprites;
+	// The script's exbg/exsp patterns (lbg2 big images excluded, as on low
+	// memory) and meplay, as whole commands: ";lbg" in a comment is skipped.
+	for (const char *p = start; p < end && (background.empty() || sprites.size() < 2 || loop.empty()); p++) {
+		if (p != start && p[-1] != '\n' && p[-1] != ':' && p[-1] != ' ' && p[-1] != '\t')
+			continue;
+		const char *q = p;
+		if (literal(q, "lbg ")) {
+			std::string slot = token(q, name), alias;
+			if (!background.empty() || slot.size() < 2 || slot[0] != 's' || !literal(q, ",\""))
+				continue;
+			std::string picture = token(q, name);
+			if (picture.empty() || !literal(q, "\"") || !script_h.findStrAlias(picture.c_str(), &alias))
+				continue;
+			// ":c;backgrounds\name.png": tags, then a file (not a colour or layer).
+			auto semicolon = alias.find(';');
+			if (alias.size() < 3 || alias[0] != ':' || semicolon == std::string::npos)
+				continue;
+			std::string file = alias.substr(semicolon + 1);
+			if (file.size() < 5 || file[0] == '>' || file[0] == '*' ||
+			    (!equalstr(file.c_str() + file.size() - 4, ".png") && !equalstr(file.c_str() + file.size() - 4, ".PNG")))
+				continue;
+			translatePathSlashes(file);
+			if (!shown(slot, file)) {
+				background    = file;
+				backgroundRgb = alias[1] == 'c'; // As buildAIImage loads a TRANS_COPY image.
+			}
+		} else if (literal(q, "lss ")) {
+			std::string slot = token(q, name);
+			if (sprites.size() >= 2 || slot.size() < 2 || slot[0] != 's' || !literal(q, ",\""))
+				continue;
+			std::string section = token(q, name);
+			if (section.empty() || !literal(q, "\",\""))
+				continue;
+			std::string key = token(q, name);
+			if (key.empty() || !literal(q, "\""))
+				continue;
+			// The body *lss loads; mouth strips are a few KiB.
+			std::string file = "sprites\\" + section + "\\1\\" + section + "_" + key + ".png";
+			translatePathSlashes(file);
+			if (!shown(slot, file) && std::find(sprites.begin(), sprites.end(), file) == sprites.end())
+				sprites.push_back(file);
+		} else if (literal(q, "meplay ")) {
+			if (!loop.empty() || token(q, digit).empty() || !literal(q, ","))
+				continue;
+			std::string number = token(q, digit);
+			if (number.empty() || !literal(q, ","))
+				continue;
+			// *meplay plays tree 5's file for that number (*me_generate).
+			try {
+				std::deque<std::string> key{number};
+				loop = dataTrees[5].getValue(key);
+			} catch (const std::exception &) {
+				loop.clear();
+			}
+			if (loop == "off")
+				loop.clear();
+			translatePathSlashes(loop);
+		}
+	}
+
+	if (background.empty() && sprites.empty() && loop.empty())
+		return;
+	if (!nativePrefetchMemoryOk()) {
+		nativeReleasePrefetches(); // Low on memory: give the script what we hold.
+		return;
+	}
+	if (!background.empty() || !sprites.empty())
+		nativeQueueImagePrefetch(background, backgroundRgb, sprites);
+	if (!loop.empty())
+		nativeQueueLoopPrefetch(loop);
+}
+
+// The heap's free space, counting what it has not yet taken from the system.
+// Prefetching needs no SDL buffer spilled into vitaGL's pools (memory.cpp)
+// and leaves at least 24 MiB beyond its own need (total) for the script; the
+// largest block it will ask for must fit in newlib now.
+bool ONScripter::nativePrefetchMemoryOk(size_t total, size_t largest) {
+	constexpr size_t reserve = 24 * 1024 * 1024;
+	const struct mallinfo info = mallinfo();
+	const auto heap       = static_cast<size_t>(_newlib_heap_size_user);
+	const auto arena      = static_cast<size_t>(info.arena);
+	const size_t heapFree = static_cast<size_t>(info.fordblks) + (heap > arena ? heap - arena : 0);
+	bool ok               = VitaMemory::spilledBytes() == 0 && heapFree >= reserve + total;
+	if (ok && largest) {
+		void *probe = std::malloc(largest); // newlib only: never spills
+		ok          = probe != nullptr;
+		std::free(probe);
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	static std::atomic<bool> wasOk{true};
+	if (!largest && wasOk.exchange(ok) != ok)
+		sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: heap free %u KiB, spilled %u KiB\n",
+		          static_cast<unsigned>(SDL_GetTicks()), ok ? "resumed" : "paused", static_cast<unsigned>(heapFree / 1024),
+		          static_cast<unsigned>(VitaMemory::spilledBytes() / 1024));
+#endif
+	return ok;
+}
+
+// Whether prefetch file reads should pause: the script is loading an image or
+// sound, or did so in the last 30 ms (an lss loads its mouth right after the
+// body), unless that load is waiting for the prefetch itself.
+bool ONScripter::nativePrefetchShouldYield() {
+	return !nativePrefetchAwaited &&
+	       (nativeImageLoads > 0 || nativeSoundLoads > 0 || SDL_GetTicks() - nativeScriptLoadEnd < 30);
+}
+
+// Opens a prefetch target, or nullptr if it is missing (so no loader error
+// dialog comes from the prefetch thread) or larger than maxBytes.
+FILE *ONScripter::nativePrefetchOpen(const std::string &file, size_t maxBytes, size_t &length) {
+	std::unique_ptr<char[]> path(script_h.reader->completePath(file.c_str(), FileType::File));
+	FILE *fp = path ? FileIO::openFile(path.get(), "rb") : nullptr;
+	if (!fp)
+		return nullptr;
+	off_t size{-1};
+	if (fseeko(fp, 0, SEEK_END) != 0 || (size = ftello(fp)) <= 0 || static_cast<uint64_t>(size) > maxBytes ||
+	    fseeko(fp, 0, SEEK_SET) != 0) {
+		std::fclose(fp);
+		return nullptr;
+	}
+	length = static_cast<size_t>(size);
+	return fp;
+}
+
+// Reads a prefetch target in 64 KiB pieces, pausing while the script loads,
+// so its file I/O never competes with a load the script is waiting for.
+bool ONScripter::nativePrefetchRead(FILE *fp, uint8_t *data, size_t length) {
+	constexpr size_t piece = 64 * 1024;
+	for (size_t done = 0; done < length;) {
+		while (nativePrefetchShouldYield())
+			if (async.threadShutdownRequested)
+				return false;
+			else
+				SDL_Delay(2);
+		const size_t step = std::min(piece, length - done);
+		if (std::fread(data + done, 1, step, fp) != step)
+			return false;
+		done += step;
+	}
+	return true;
+}
+
+// Queued -> Decoding on this thread. False, with the entry emptied unless it
+// was replaced or cancelled, when skipping or short of memory.
+bool ONScripter::nativeBeginPrefetch(NativePrefetch &entry, void *guard, const std::string &file) {
+	const bool allowed = !(skip_mode & (SKIP_NORMAL | SKIP_SUPERSKIP)) && !keyState.ctrl && nativePrefetchMemoryOk();
+	Lock lock(guard);
+	if (entry.state != NativePrefetch::State::Queued || entry.file != file)
+		return false; // Replaced, or the script loaded it first.
+	if (!allowed) {
+		entry.state = NativePrefetch::State::Empty;
+		entry.file.clear();
+		return false;
+	}
+	entry.state          = NativePrefetch::State::Decoding;
+	entry.thread         = sceKernelGetThreadId();
+	nativePrefetchAwaited = false;
+	return true;
+}
+
+void ONScripter::nativeQueueImagePrefetch(const std::string &background, bool backgroundRgb,
+                                          const std::vector<std::string> &sprites) {
+	using State = NativePrefetch::State;
+	Lock cacheLock(&imageCache);
+	if (!nativeImagePrefetchSlots) {
+		for (auto &entry : nativeImagePrefetch) imageCache.makeLRU(entry.slot, 1);
+		nativeImagePrefetchSlots = true;
+	}
+	Lock lock(&nativeImagePrefetch);
+	auto held = [this](const NativePrefetch &entry, const std::string &file) {
+		return entry.file == file && (entry.state == State::Queued || entry.state == State::Decoding ||
+		                              (entry.state == State::Ready && imageCache.get(file)));
+	};
+	auto queue = [this](NativePrefetch &entry, const std::string &file, bool allow_rgb) {
+		imageCache.clear(entry.slot); // A picture the script did not use after all.
+		entry.file  = file;
+		entry.state = State::Queued;
+		async.cacheImage(entry.slot, file, allow_rgb);
+#if defined(ONS_VITA_FILE_LOGGING)
+		sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: queued\n", static_cast<unsigned>(SDL_GetTicks()), file.c_str());
+#endif
+	};
+	auto &slot = nativeImagePrefetch[0];
+	if (!background.empty() && !held(slot, background) && slot.state != State::Decoding && !imageCache.get(background))
+		queue(slot, background, backgroundRgb);
+	for (auto &file : sprites) {
+		if (held(nativeImagePrefetch[1], file) || held(nativeImagePrefetch[2], file) || imageCache.get(file))
+			continue;
+		for (int i : {1, 2}) {
+			auto &entry = nativeImagePrefetch[i];
+			if (entry.state != State::Decoding &&
+			    (entry.file == file || std::find(sprites.begin(), sprites.end(), entry.file) == sprites.end())) {
+				queue(entry, file, false); // *lss loads ":a" sprites.
+				break;
+			}
+		}
+	}
+}
+
+// LoadImageCacheInstruction for a prefetch slot, on the image cache thread,
+// which runs every prefetch one at a time (the loop as well: Sound.cpp).
+// Returns false for the script's own cache slots.
+bool ONScripter::nativeRunImagePrefetch(int slot, const std::string &file, bool allow_rgb) {
+	using State = NativePrefetch::State;
+	if (slot == nativeLoopPrefetch.slot)
+		return nativeRunLoopPrefetch(file);
+	NativePrefetch *entry{nullptr};
+	for (auto &e : nativeImagePrefetch)
+		if (e.slot == slot)
+			entry = &e;
+	if (!entry)
+		return false;
+	// Optional work: script loads, audio and rendering preempt it, and it
+	// starts only between the script's loads.
+	SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
+	while (nativePrefetchShouldYield() && !async.threadShutdownRequested)
+		SDL_Delay(5);
+	if (!nativeBeginPrefetch(*entry, &nativeImagePrefetch, file))
+		return true;
+
+#if defined(ONS_VITA_FILE_LOGGING)
+	const auto decodeStart = SDL_GetTicks();
+#endif
+	const unsigned epoch = nativePrefetchEpoch;
+	// Background and sprite budgets; the few larger pictures load as before.
+	const uint64_t budget = entry == &nativeImagePrefetch[0] ? 4 * 1024 * 1024 : 2560 * 1024;
+	// From here on allocations fail (nullptr / std::bad_alloc) instead of
+	// spilling into vitaGL's pools or reaching the fatal new-handler.
+	VitaMemory::SoftAllocations soft;
+	std::shared_ptr<Wrapped_SDL_Surface> picture;
+	{
+		bool has_alpha{false};
+		SDL_Surface *surface{nullptr};
+		try {
+			size_t length{0};
+			std::unique_ptr<FILE, int (*)(FILE *)> fp(nativePrefetchOpen(file, 4 * 1024 * 1024, length), std::fclose);
+			uint8_t header[33];
+			// Only 8/16-bit RGB (for ":c") and RGBA PNGs: loadImage then needs
+			// no format conversion, the decode's only allocation besides the
+			// file and the surface.
+			if (fp && length > sizeof(header) && std::fread(header, 1, sizeof(header), fp.get()) == sizeof(header) &&
+			    !std::memcmp(header, "\x89PNG\r\n\x1a\n", 8) && !std::memcmp(header + 12, "IHDR", 4) &&
+			    (header[24] == 8 || header[24] == 16)) {
+				const uint64_t width  = (uint64_t{header[16]} << 24) | (header[17] << 16) | (header[18] << 8) | header[19];
+				const uint64_t height = (uint64_t{header[20]} << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
+				const unsigned bytes  = header[25] == 6 ? 4 : header[25] == 2 && allow_rgb ? 3 : 0;
+				const uint64_t pixels = width * height * bytes;
+				if (pixels && pixels <= budget &&
+				    nativePrefetchMemoryOk(length + pixels + 1024 * 1024, std::max<size_t>(length, pixels)) &&
+				    std::fseek(fp.get(), 0, SEEK_SET) == 0) {
+					nativePrefetchBuffer = new (std::nothrow) uint8_t[length + 1];
+					if (nativePrefetchBuffer && nativePrefetchRead(fp.get(), nativePrefetchBuffer, length)) {
+						nativePrefetchBuffer[length] = 0;
+						nativePrefetchLength         = length;
+					} else {
+						freearr(&nativePrefetchBuffer);
+					}
+				}
+			}
+			fp.reset();
+			// createSurfaceFromFile takes the buffer (nativeTakePrefetchBuffer).
+			if (nativePrefetchBuffer)
+				surface = loadImage(file.c_str(), &has_alpha, allow_rgb);
+			if (surface)
+				picture = std::make_shared<Wrapped_SDL_Surface>(surface, has_alpha);
+		} catch (const std::bad_alloc &) {
+			if (surface && !picture) // Out of memory: skip, as if never queued.
+				SDL_FreeSurface(surface);
+		} catch (...) {
+			freearr(&nativePrefetchBuffer);
+			Lock lock(&nativeImagePrefetch);
+			entry->state  = State::Empty;
+			entry->thread = 0;
+			entry->file.clear();
+			throw;
+		}
+		freearr(&nativePrefetchBuffer); // Not taken: the file was cached already.
+	}
+
+	bool ready{false};
+	{
+		Lock cacheLock(&imageCache);
+		// nativeReleasePrefetches may have run meanwhile: then drop it.
+		if (picture && epoch == nativePrefetchEpoch && !imageCache.get(file)) {
+			try {
+				imageCache.add(slot, file, picture);
+				ready = true;
+			} catch (const std::bad_alloc &) {
+			}
+		}
+		Lock lock(&nativeImagePrefetch);
+		entry->state  = ready ? State::Ready : State::Empty;
+		entry->thread = 0;
+		if (!ready)
+			entry->file.clear();
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: %s after %u ms\n", static_cast<unsigned>(SDL_GetTicks()),
+	          file.c_str(), ready ? "decoded" : "dropped", static_cast<unsigned>(SDL_GetTicks() - decodeStart));
+#endif
+	return true;
+}
+
+// Whether this thread is decoding a prefetch.
+bool ONScripter::nativeReadingPrefetchedImage() {
+	const int self = sceKernelGetThreadId();
+	Lock lock(&nativeImagePrefetch);
+	for (auto &entry : nativeImagePrefetch)
+		if (entry.state == NativePrefetch::State::Decoding && entry.thread == self)
+			return true;
+	return false;
+}
+
+// createSurfaceFromFile on the prefetch thread: the file nativeRunImagePrefetch
+// already read, instead of a read under the script loader's lock.
+bool ONScripter::nativeTakePrefetchBuffer(size_t &length, uint8_t **buffer) {
+	if (!nativeReadingPrefetchedImage() || !nativePrefetchBuffer)
+		return false;
+	*buffer              = nativePrefetchBuffer;
+	length               = nativePrefetchLength;
+	nativePrefetchBuffer = nullptr;
+	nativePrefetchLength = 0;
+	return true;
+}
+
+// loadImage, before its cache lookup: a queued prefetch of this file is
+// dropped (this load decodes it now); one being decoded is awaited, at this
+// thread's priority, as finishing it takes less time than starting over.
+void ONScripter::nativeAwaitPrefetchedImage(const char *file) {
+	using State    = NativePrefetch::State;
+	const int self = sceKernelGetThreadId();
+	bool boosted{false};
+#if defined(ONS_VITA_FILE_LOGGING)
+	const auto waitStart = SDL_GetTicks();
+#endif
+	while (true) {
+		{
+			Lock lock(&nativeImagePrefetch);
+			NativePrefetch *entry{nullptr};
+			for (auto &e : nativeImagePrefetch)
+				if (e.state != State::Empty && e.file == file)
+					entry = &e;
+			if (!entry || entry->state == State::Ready || entry->thread == self)
+				break;
+			if (entry->state == State::Queued) {
+				entry->state = State::Empty;
+				entry->file.clear();
+#if defined(ONS_VITA_FILE_LOGGING)
+				sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: still queued, loading it now\n",
+				          static_cast<unsigned>(SDL_GetTicks()), file);
+#endif
+				break;
+			}
+			if (!boosted) {
+				nativePrefetchAwaited = true; // Its reads stop pausing for this load.
+				sceKernelChangeThreadPriority(entry->thread, sceKernelGetThreadCurrentPriority());
+				boosted = true;
+			}
+		}
+		SDL_Delay(1);
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	if (boosted)
+		sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: waited %u ms for its decode\n",
+		          static_cast<unsigned>(SDL_GetTicks()), file, static_cast<unsigned>(SDL_GetTicks() - waitStart));
+#endif
+}
+
+// loadImage found the file cached, holding imageCache's lock. A prefetched
+// picture is handed over once: its user now holds the only reference.
+void ONScripter::nativeConsumePrefetchedImage(const char *file) {
+	Lock lock(&nativeImagePrefetch);
+	for (auto &entry : nativeImagePrefetch) {
+		if (entry.state != NativePrefetch::State::Ready || entry.file != file)
+			continue;
+		imageCache.clear(entry.slot);
+		entry.state = NativePrefetch::State::Empty;
+		entry.file.clear();
+#if defined(ONS_VITA_FILE_LOGGING)
+		sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: hit\n", static_cast<unsigned>(SDL_GetTicks()), file);
+#endif
+	}
+}
+
+// Real loads come first: frees every prefetched picture and loop, drops
+// queued ones, and makes an in-flight one discard its result. Called before
+// big images, when memory runs low, and on the out-of-memory retry and
+// reclaim paths.
+void ONScripter::nativeReleasePrefetches() {
+	using State = NativePrefetch::State;
+	{
+		Lock cacheLock(&imageCache);
+		nativePrefetchEpoch++;
+		Lock lock(&nativeImagePrefetch);
+		for (auto &entry : nativeImagePrefetch) {
+			imageCache.clear(entry.slot);
+			if (entry.state == State::Ready || entry.state == State::Queued) {
+				entry.state = State::Empty;
+				entry.file.clear();
+			}
+		}
+	}
+	{
+		Lock cacheLock(&soundCache);
+		Lock lock(&nativeLoopPrefetch);
+		soundCache.clear(nativeLoopPrefetch.slot);
+		if (nativeLoopPrefetch.state == State::Ready || nativeLoopPrefetch.state == State::Queued) {
+			nativeLoopPrefetch.state = State::Empty;
+			nativeLoopPrefetch.file.clear();
+		}
+	}
+}
+#endif
 
 void ONScripter::freeRedundantSurfaces(AnimationInfo &ai) {
 	// Our test for whether a surface is "redundant" is initially cautious for safety.

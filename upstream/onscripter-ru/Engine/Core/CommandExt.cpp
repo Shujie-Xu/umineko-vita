@@ -1754,8 +1754,9 @@ int ONScripter::presetdefineCommand() {
 	}
 
 	presets[num].font_number = font_number;
-	presets[num].preset_id   = num;
-	presets[num].font_size   = script_h.readInt();
+	presets[num].preset_id      = num;
+	presets[num].size_preset_id = num;
+	presets[num].font_size      = script_h.readInt();
 
 	bool is_colour;
 	const char *buf;
@@ -2093,10 +2094,34 @@ int ONScripter::mainGotoCommand() {
 int ONScripter::gotoCommand() {
 	const char *target = script_h.readLabel();
 #ifdef VITA
-	// Incremental entries have voice replay but no superskip jump target,
-	// matching Android. Full-log mode retains the script's original rewind.
-	if (!nativeFullLogEnabled() && equalstr(target + 1, "log_jump_request"))
+	// Full-log mode retains the script's original rewind. The incremental
+	// log can only jump to a line whose chapter heading it holds.
+	if (!nativeFullLogEnabled() && equalstr(target + 1, "log_jump_request") && !nativeLogJumpAvailable())
 		return RET_CONTINUE;
+#endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	if (equalstr(target + 1, "log_jump_request"))
+		sendToLog(LogLevel::Warn, "Log jump: asking to jump\n");
+#endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: a label in debug_jump.txt replaces the first jump to
+	// the boot logos, so a late scene can be tested without replaying to it.
+	static bool debugJumpChecked = false;
+	if (!debugJumpChecked && equalstr(target + 1, "boot_logo")) {
+		debugJumpChecked = true;
+		if (FILE *file = std::fopen("ux0:data/umineko-native/debug_jump.txt", "r")) {
+			char label[128]{};
+			bool read = std::fscanf(file, " *%127[A-Za-z0-9_]", label) == 1 ||
+			            (std::rewind(file), std::fscanf(file, " %127[A-Za-z0-9_]", label) == 1);
+			std::fclose(file);
+			if (read) {
+				sendToLog(LogLevel::Warn, "Debug jump: *boot_logo -> *%s\n", label);
+				setCurrentLabel(label);
+				tryEndSuperSkip(false);
+				return RET_CONTINUE;
+			}
+		}
+	}
 #endif
 	setCurrentLabel(target + 1);
 	tryEndSuperSkip(false);
@@ -2351,6 +2376,11 @@ int ONScripter::jskipCommand() {
 }
 
 int ONScripter::jnskipCommand() {
+#ifdef VITA
+	if ((skip_mode & SKIP_NORMAL || keyState.ctrl) && !(skip_mode & SKIP_SUPERSKIP) && !nativeFullLogEnabled() &&
+	    current_label_info && current_label_info->name && equalstr(current_label_info->name, "load_voice"))
+		nativeRecordSkippedVoice();
+#endif
 	if (!(skip_mode & SKIP_NORMAL || keyState.ctrl))
 		jumpToTilde(false);
 	return RET_CONTINUE;
@@ -2955,6 +2985,11 @@ int ONScripter::clearLogCommand() {
 			tree.insertionOrder.resize(firstTooLargeElement);
 			script_h.logState.logEntries.resize(firstTooLargeElement);
 		}
+#ifdef VITA
+		// Only *log_jump_execute clears partially.
+		if (!nativeFullLogEnabled())
+			nativeTrimLogAtJumpTarget(tree);
+#endif
 		script_h.choiceState.choiceVector.resize(newCVS.choiceVectorSize);
 	} else {
 		// Full clear
@@ -3104,6 +3139,15 @@ int ONScripter::cacheSlotTypeCommand() {
 	std::string s(script_h.readStr());
 	if (s.compare("lru") == 0) {
 		int capacity = script_h.readInt();
+#ifdef VITA
+		// Cached Mix_Chunks are decoded to the 48 kHz stereo output format,
+		// about 8.7x the size of the 22 kHz mono sources (a 32 s ME is 5.9 MiB).
+		// The script's 25-entry voice/SE sets can pin 50-180 MiB of the 192 MiB
+		// newlib heap, which later fails multi-MiB dwaveload decodes. Ten still
+		// covers the script's five-voice lookahead plus the playing line.
+		if (!image && capacity > 10)
+			capacity = 10;
+#endif
 		if (image) {
 			Lock lock(&imageCache);
 			imageCache.makeLRU(slotnumber, capacity);
@@ -3139,6 +3183,14 @@ int ONScripter::asyncLoadCacheCommand() {
 	if (image) {
 		async.cacheImage(id, filename, allow_rgb);
 	} else {
+#ifdef VITA
+		// Skipping consumes lines faster than the cache thread decodes them, so
+		// its FIFO fills with lookahead voices for lines already passed. Those
+		// decodes compete with the main thread and churn the heap; caching is
+		// only an optimisation, so drop the request while skipping.
+		if ((skip_mode & (SKIP_NORMAL | SKIP_SUPERSKIP)) || keyState.ctrl)
+			return RET_CONTINUE;
+#endif
 		async.cacheSound(id, filename);
 	}
 	return RET_CONTINUE;
