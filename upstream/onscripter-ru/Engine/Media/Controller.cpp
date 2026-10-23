@@ -15,6 +15,13 @@
 
 #include <stdexcept>
 #include <cassert>
+#ifdef __vita__
+#include <algorithm>
+#if defined(ONS_VITA_FILE_LOGGING)
+#include "platform/vita/platform.hpp"
+#include <psp2/kernel/threadmgr.h>
+#endif
+#endif
 
 MediaProcController media;
 
@@ -333,6 +340,13 @@ bool MediaProcController::addSubtitles(const char *filename, int frameWidth, int
 	SDL_LockMutex(subtitleMutex);
 	bool prepared = static_cast<SubtitleDecoder *>(decoders[SubsEntry].get())->prepare(filename, frameWidth, frameHeight);
 	SDL_UnlockMutex(subtitleMutex);
+#ifdef __vita__
+	// A whole track up front can be rendered ahead (startNativeSubtitles);
+	// embedded subtitle packets arrive with the movie and cannot.
+	nativeSubtitleFile   = prepared && filename;
+	nativeSubtitleWidth  = frameWidth;
+	nativeSubtitleHeight = frameHeight;
+#endif
 	return prepared;
 }
 
@@ -371,6 +385,9 @@ void MediaProcController::startProcessing() {
 		if (!nativeVideo.start(loopVideo)) sendToLog(LogLevel::Error, "Native video start failed: %s\n", nativeVideo.error());
 		else sendToLog(LogLevel::Info, "Native video: AvPlayer auto-start, duration %llu ms\n",
 		               static_cast<unsigned long long>(nativeVideo.duration()));
+		// Pictures that presentNativeFrame composes (see advanceVideoFrames).
+		if (!alphaMasked && hardwareConversion && nativeSubtitleFile && hasStream(SubsEntry))
+			startNativeSubtitles();
 	}
 	else
 #endif
@@ -427,6 +444,9 @@ bool MediaProcController::finish(bool needLastFrame) {
 }
 
 void MediaProcController::resetDecoders() {
+#ifdef __vita__
+	stopNativeSubtitles(); // it renders with the subtitle decoder
+#endif
 	// Destroy decoders
 	SDL_mutexP(subtitleMutex);
 	for (auto &decoder : decoders) {
@@ -728,6 +748,44 @@ std::unique_ptr<MediaProcController::MediaFrame> MediaProcController::advanceVid
 #ifdef __vita__
 void MediaProcController::presentNativeFrame(GPU_Image *target, MediaFrame &frame) {
 	if (!nativeYuvImage) nativeYuvImage = gpu.createImage(16, 16, 4, false, false);
+#if defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: main-thread time spent on subtitles in this frame.
+	uint64_t overlayTicks = SDL_GetPerformanceCounter();
+#endif
+	// An .ass file is rendered ahead by nativeSubtitleLoop. libass takes
+	// 35-130 ms for a new line here (more with new glyphs); on this thread
+	// that dropped two to seven frames of the movie at every line change.
+	bool overlayChanged = nativeSubtitleThread && takeNativeOverlay(frame.msTimeStamp);
+#if defined(ONS_VITA_FILE_LOGGING)
+	overlayTicks = SDL_GetPerformanceCounter() - overlayTicks;
+#endif
+	auto uploadOverlay = [&] {
+#if defined(ONS_VITA_FILE_LOGGING)
+		const uint64_t uploadStart = SDL_GetPerformanceCounter();
+#endif
+		if (nativeSubtitleImage && (nativeSubtitleImage->w != nativeSubtitleBounds.w || nativeSubtitleImage->h != nativeSubtitleBounds.h)) {
+			gpu.freeImage(nativeSubtitleImage); nativeSubtitleImage = nullptr;
+		}
+		if (nativeSubtitleBounds.w && nativeSubtitleBounds.h) {
+			if (!nativeSubtitleImage) nativeSubtitleImage = gpu.createImage(nativeSubtitleBounds.w, nativeSubtitleBounds.h, 4, false, false);
+			GPU_UpdateImageBytes(nativeSubtitleImage, nullptr, nativeSubtitlePixels.data(), nativeSubtitleBounds.w * 4);
+		}
+#if defined(ONS_VITA_FILE_LOGGING)
+		// Logged by nativeSubtitleLoop, or here without it (embedded subtitles).
+		overlayTicks += SDL_GetPerformanceCounter() - uploadStart;
+		const auto us = static_cast<uint32_t>(overlayTicks * 1000000 / SDL_GetPerformanceFrequency());
+		if (nativeSubtitleThread) {
+			nativeApplyUs.store(us, std::memory_order_relaxed);
+			nativeApplyWorstUs.store(std::max(nativeApplyWorstUs.load(std::memory_order_relaxed), us), std::memory_order_relaxed);
+			nativeApplies.fetch_add(1, std::memory_order_release);
+		} else {
+			static unsigned slow{0};
+			if (us >= 10000 && slow++ < 30)
+				sendToLog(LogLevel::Warn, "Movie subtitles: a change at %llu ms took %u us on the main thread (libass, blend and upload)\n",
+				          static_cast<unsigned long long>(frame.msTimeStamp), us);
+		}
+#endif
+	};
 	if (nativeYuvImage && nativeVideo.bindFrame(static_cast<unsigned>(GPU_GetTextureHandle(nativeYuvImage)))) {
 		GPU_GetTarget(target);
 		GPU_SetBlending(nativeYuvImage, false);
@@ -737,20 +795,22 @@ void MediaProcController::presentNativeFrame(GPU_Image *target, MediaFrame &fram
 		nativeVideo.finishFrameUse(); // release decoder storage before libass work
 		// Subtitles remain full libass output (including animated ASS). Only
 		// changed glyph regions are uploaded; decoder pixels stay untouched.
-		SDL_LockMutex(subtitleMutex);
-		if (hasStream(SubsEntry)) {
-			auto &driver = static_cast<SubtitleDecoder *>(decoders[SubsEntry].get())->subtitleDriver;
-			if (driver.renderNativeOverlay(nativeSubtitlePixels, nativeSubtitleBounds, target->w, target->h, frame.msTimeStamp)) {
-				if (nativeSubtitleImage && (nativeSubtitleImage->w != nativeSubtitleBounds.w || nativeSubtitleImage->h != nativeSubtitleBounds.h)) {
-					gpu.freeImage(nativeSubtitleImage); nativeSubtitleImage = nullptr;
-				}
-				if (nativeSubtitleBounds.w && nativeSubtitleBounds.h) {
-					if (!nativeSubtitleImage) nativeSubtitleImage = gpu.createImage(nativeSubtitleBounds.w, nativeSubtitleBounds.h, 4, false, false);
-					GPU_UpdateImageBytes(nativeSubtitleImage, nullptr, nativeSubtitlePixels.data(), nativeSubtitleBounds.w * 4);
-				}
+		if (!nativeSubtitleThread) {
+#if defined(ONS_VITA_FILE_LOGGING)
+			const uint64_t renderStart = SDL_GetPerformanceCounter();
+#endif
+			SDL_LockMutex(subtitleMutex);
+			if (hasStream(SubsEntry)) {
+				auto &driver   = static_cast<SubtitleDecoder *>(decoders[SubsEntry].get())->subtitleDriver;
+				overlayChanged = driver.renderNativeOverlay(nativeSubtitlePixels, nativeSubtitleBounds, target->w, target->h, frame.msTimeStamp);
 			}
+			SDL_UnlockMutex(subtitleMutex);
+#if defined(ONS_VITA_FILE_LOGGING)
+			overlayTicks += SDL_GetPerformanceCounter() - renderStart;
+#endif
 		}
-		SDL_UnlockMutex(subtitleMutex);
+		if (overlayChanged)
+			uploadOverlay();
 		if (nativeSubtitleImage) {
 			GPU_SetBlending(nativeSubtitleImage, true);
 			gpu.copyGPUImage(nativeSubtitleImage, nullptr, nullptr, target->target,
@@ -760,9 +820,187 @@ void MediaProcController::presentNativeFrame(GPU_Image *target, MediaFrame &fram
 	} else {
 		if (!frame.surface) frame.surface = imagePool->getImage();
 		if (!nativeVideo.convertFrame(frame.surface)) return;
-		applySubtitles(frame);
+		if (nativeSubtitleThread) {
+			// The overlay already rendered, rather than libass here.
+			if (overlayChanged)
+				uploadOverlay();
+			blendNativeOverlay(frame.surface);
+		} else {
+			applySubtitles(frame);
+		}
 		gpu.updateImage(target, nullptr, frame.surface, nullptr, false);
 	}
+}
+
+// Main thread: makes the newest overlay due at `now` (ms) the current one.
+bool MediaProcController::takeNativeOverlay(uint64_t now) {
+	const uint64_t shown = nativeSubtitleShown.exchange(now, std::memory_order_relaxed);
+	if (now + 500 < shown)
+		restartNativeSubtitles(); // looped: the queue holds the end of the movie
+	bool taken{false};
+	SDL_LockMutex(nativeOverlayMutex);
+	while (!nativeOverlays.empty() && nativeOverlays.front().timestamp <= now) {
+		nativeSubtitleBounds = nativeOverlays.front().bounds;
+		nativeSubtitlePixels.swap(nativeOverlays.front().pixels);
+		nativeOverlays.pop_front();
+		taken = true;
+	}
+	SDL_UnlockMutex(nativeOverlayMutex);
+	return taken;
+}
+
+// The current overlay (premultiplied RGBA) over a CPU-converted picture.
+void MediaProcController::blendNativeOverlay(SDL_Surface *surface) {
+	const auto &r = nativeSubtitleBounds;
+	if (!surface || !r.w || !r.h || nativeSubtitlePixels.size() < static_cast<size_t>(r.w) * r.h * 4)
+		return;
+	const int bpp = surface->format->BytesPerPixel;
+	const int channel[]{surface->format->Rshift / 8, surface->format->Gshift / 8, surface->format->Bshift / 8};
+	for (int y = std::max(0, r.y); y < std::min(surface->h, r.y + r.h); y++) {
+		const uint8_t *src = nativeSubtitlePixels.data() + (static_cast<size_t>(y - r.y) * r.w) * 4;
+		auto *dst          = static_cast<uint8_t *>(surface->pixels) + static_cast<size_t>(y) * surface->pitch;
+		for (int x = std::max(0, r.x); x < std::min(surface->w, r.x + r.w); x++) {
+			const uint8_t *s   = src + (x - r.x) * 4;
+			uint8_t *d         = dst + x * bpp;
+			const unsigned inv = 255 - s[3];
+			for (int c = 0; c < 3; c++)
+				d[channel[c]] = static_cast<uint8_t>(s[c] + d[channel[c]] * inv / 255);
+		}
+	}
+}
+
+void MediaProcController::restartNativeSubtitles() {
+	SDL_LockMutex(nativeOverlayMutex);
+	nativeOverlays.clear();
+	nativeSubtitleRestart = true;
+	SDL_UnlockMutex(nativeOverlayMutex);
+}
+
+void MediaProcController::startNativeSubtitles() {
+	nativeOverlayMutex = SDL_CreateMutex();
+	nativeOverlays.clear();
+	nativeSubtitleRestart = false;
+	nativeSubtitleStop.store(false, std::memory_order_relaxed);
+	nativeSubtitleShown.store(0, std::memory_order_relaxed);
+	const uint64_t nanos = getNanosPerFrame();
+	nativeSubtitleStepUs = nanos >= 1000 ? nanos / 1000 : 33333;
+#if defined(ONS_VITA_FILE_LOGGING)
+	nativeMainThread = sceKernelGetThreadId();
+	nativeApplyUs.store(0, std::memory_order_relaxed);
+	nativeApplyWorstUs.store(0, std::memory_order_relaxed);
+	nativeApplies.store(0, std::memory_order_relaxed);
+#endif
+	if (nativeOverlayMutex)
+		nativeSubtitleThread = SDL_CreateThread(nativeSubtitleLoop, "nativeSubtitles", this);
+	if (!nativeSubtitleThread) {
+		// presentNativeFrame renders them itself, as before.
+		sendToLog(LogLevel::Error, "Movie subtitles: no rendering thread (%s)\n", SDL_GetError());
+		if (nativeOverlayMutex)
+			SDL_DestroyMutex(nativeOverlayMutex);
+		nativeOverlayMutex = nullptr;
+	}
+}
+
+void MediaProcController::stopNativeSubtitles() {
+	if (nativeSubtitleThread) {
+		nativeSubtitleStop.store(true, std::memory_order_release);
+		SDL_WaitThread(nativeSubtitleThread, nullptr); // at most one libass render
+		nativeSubtitleThread = nullptr;
+	}
+	if (nativeOverlayMutex)
+		SDL_DestroyMutex(nativeOverlayMutex);
+	nativeOverlayMutex = nullptr;
+	nativeOverlays.clear();
+	nativeSubtitleFile = false;
+}
+
+int MediaProcController::nativeSubtitleLoop(void *data) {
+	// At most this many overlays wait, and none further ahead of the picture
+	// than this. A new line renders in 35-130 ms, the first (fonts) in up to
+	// 700 ms; a fade changes the overlay every frame.
+	constexpr size_t QueuedMax{4};
+	constexpr uint64_t AheadMaxMs{2000};
+	auto &self = *static_cast<MediaProcController *>(data);
+	// Like the ass.dll decoder: the main thread preempts it on a shared core.
+	SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
+#if defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: line changes (renders over 10 ms, or late ones) and
+	// main-thread overlay uploads over 2 ms, then a summary. Written here so
+	// the card writes stay off the main thread.
+	VitaPlatform::logThreadPlacement("main (movie subtitles start)", self.nativeMainThread);
+	VitaPlatform::logThreadPlacement("movie subtitles", sceKernelGetThreadId());
+	unsigned logged{0}, appliesSeen{0}, renders{0}, late{0}, renderWorstMs{0};
+#endif
+	uint64_t nextUs{0};
+	bool force{true}; // the first render, and after a restart, sets the overlay
+	while (!self.nativeSubtitleStop.load(std::memory_order_acquire)) {
+#if defined(ONS_VITA_FILE_LOGGING)
+		const uint32_t applies = self.nativeApplies.load(std::memory_order_acquire);
+		if (applies != appliesSeen) {
+			appliesSeen   = applies;
+			const auto us = self.nativeApplyUs.load(std::memory_order_relaxed);
+			if (us >= 2000 && logged++ < 200)
+				sendToLog(LogLevel::Warn, "Movie subtitles: the main thread took %u us to take and upload an overlay\n", us);
+		}
+#endif
+		const uint64_t shownMs = self.nativeSubtitleShown.load(std::memory_order_relaxed);
+		SDL_LockMutex(self.nativeOverlayMutex);
+		if (self.nativeSubtitleRestart) {
+			self.nativeSubtitleRestart = false;
+			nextUs                     = shownMs * 1000;
+			force                      = true;
+		}
+		const size_t queued = self.nativeOverlays.size();
+		SDL_UnlockMutex(self.nativeOverlayMutex);
+		// Behind the picture: skip what is already due.
+		nextUs = std::max(nextUs, shownMs * 1000);
+		if (queued >= QueuedMax || nextUs > (shownMs + AheadMaxMs) * 1000) {
+			SDL_Delay(4);
+			continue;
+		}
+
+		NativeOverlay overlay{nextUs / 1000, {}, {}};
+		bool changed{false};
+#if defined(ONS_VITA_FILE_LOGGING)
+		const uint32_t renderStart = SDL_GetTicks();
+#endif
+		SDL_LockMutex(self.subtitleMutex);
+		if (self.hasStream(SubsEntry)) {
+			auto &driver = static_cast<SubtitleDecoder *>(self.decoders[SubsEntry].get())->subtitleDriver;
+			changed      = driver.renderNativeOverlay(overlay.pixels, overlay.bounds, self.nativeSubtitleWidth,
+			                                          self.nativeSubtitleHeight, overlay.timestamp, force);
+		}
+		SDL_UnlockMutex(self.subtitleMutex);
+		force = false;
+		if (changed) {
+#if defined(ONS_VITA_FILE_LOGGING)
+			const uint64_t picture  = self.nativeSubtitleShown.load(std::memory_order_relaxed);
+			const uint32_t renderMs = SDL_GetTicks() - renderStart;
+			renders++;
+			late += overlay.timestamp < picture;
+			renderWorstMs = std::max(renderWorstMs, renderMs);
+			if ((renderMs >= 10 || overlay.timestamp < picture) && logged++ < 200)
+				sendToLog(LogLevel::Warn, "Movie subtitles: overlay for %llu ms (%dx%d) rendered in %u ms, picture at %llu ms\n",
+				          static_cast<unsigned long long>(overlay.timestamp), overlay.bounds.w, overlay.bounds.h,
+				          renderMs, static_cast<unsigned long long>(picture));
+#endif
+			SDL_LockMutex(self.nativeOverlayMutex);
+			if (!self.nativeSubtitleRestart) // else rendered from where the picture no longer is
+				self.nativeOverlays.push_back(std::move(overlay));
+			SDL_UnlockMutex(self.nativeOverlayMutex);
+		}
+		nextUs += self.nativeSubtitleStepUs;
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	sendToLog(LogLevel::Warn,
+	          "Movie subtitles: %u overlays rendered ahead (worst %u ms, %u late); the main thread took %u of them, "
+	          "worst %u us\n",
+	          renders, renderWorstMs, late, self.nativeApplies.load(std::memory_order_acquire),
+	          self.nativeApplyWorstUs.load(std::memory_order_relaxed));
+	VitaPlatform::logThreadPlacement("main (movie subtitles end)", self.nativeMainThread);
+	VitaPlatform::logThreadPlacement("movie subtitles", sceKernelGetThreadId());
+#endif
+	return 0;
 }
 #endif
 

@@ -11,4 +11,7 @@ void ons_vita_note_target_scene(const SceGxmRenderTarget *target);
 void ons_vita_finish_readback(void);
 /* Run vitaGL's deferred frees now instead of over the next presented frames. */
 void ons_vita_reclaim_deferred_gpu_memory(void);
+/* Diagnostic builds (ONS_VITA_GPU_CENSUS) only. */
+void ons_vita_fbo_census(unsigned *live, unsigned *gen_failures, unsigned *reclaims);
+void ons_vita_gpu_census_report(void);
 #endif

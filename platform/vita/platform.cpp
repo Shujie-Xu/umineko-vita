@@ -8,11 +8,12 @@
 
 #include <psp2/ctrl.h>
 #include <psp2/power.h>
+#ifdef ONS_VITA_FILE_LOGGING
+#include <psp2/kernel/threadmgr.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 #include <cerrno>
-#include <cctype>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,35 +38,12 @@ const char *gameRoot() { return ONS_VITA_GAME_ROOT; }
 const char *dataRoot() { return ONS_VITA_DATA_ROOT; }
 const char *saveRoot() { return ONS_VITA_GAME_ROOT "save/"; }
 
+// The release data's images are prepared at half their PC size. This is fixed
+// rather than read from render_scale.txt: without that file (old or partial
+// installs) every render target was four times larger and the game ran out of
+// memory at the title screen.
 float renderScale() {
-	static const float scale = [] {
-		float result = 1.0f;
-		FILE *file = std::fopen(ONS_VITA_GAME_ROOT "render_scale.txt", "r");
-		if (!file)
-			return result;
-		char buffer[64]{};
-		if (std::fgets(buffer, sizeof(buffer), file)) {
-			char *end = nullptr;
-			errno = 0;
-			float candidate = std::strtof(buffer, &end);
-			bool valid = end != buffer && errno != ERANGE;
-			while (*end && std::isspace(static_cast<unsigned char>(*end)))
-				++end;
-			// Reject truncated or trailing non-whitespace input as well as
-			// NaN/infinity, which would corrupt target-size calculations.
-			int remaining;
-			while ((remaining = std::fgetc(file)) != EOF)
-				if (!std::isspace(static_cast<unsigned char>(remaining)))
-					valid = false;
-			if (valid && *end == '\0' && std::isfinite(candidate) && candidate >= 0.25f && candidate <= 1.0f)
-				result = candidate;
-			else
-				std::fprintf(stderr, "Invalid render_scale.txt; using original asset scale 1.0\n");
-		}
-		std::fclose(file);
-		return result;
-	}();
-	return scale;
+	return 0.5f;
 }
 
 bool initialize() {
@@ -103,4 +81,22 @@ bool initialize() {
 	VitaAssets::initializeImageSizes();
 	return true;
 }
+
+#ifdef ONS_VITA_FILE_LOGGING
+void logThreadPlacement(const char *label, int threadId) {
+	SceKernelThreadInfo info{};
+	info.size        = sizeof(info);
+	const int result = sceKernelGetThreadInfo(threadId, &info);
+	if (result < 0) {
+		std::fprintf(stderr, "Threads: %s: no thread info (0x%08x)\n", label, static_cast<unsigned>(result));
+		return;
+	}
+	std::fprintf(stderr,
+	             "Threads: %s (%s): priority %d (initial %d), affinity 0x%x (initial 0x%x), CPU %d (last ran on %d), "
+	             "moved between CPUs %d times, ran %llu ms\n",
+	             label, info.name, info.currentPriority, info.initPriority, static_cast<unsigned>(info.currentCpuAffinityMask),
+	             static_cast<unsigned>(info.initCpuAffinityMask), info.currentCpuId, info.lastExecutedCpuId,
+	             info.changeCpuCount, static_cast<unsigned long long>(info.runClocks / 1000));
+}
+#endif
 }

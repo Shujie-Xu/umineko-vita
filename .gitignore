@@ -1,6 +1,7 @@
 # --- build outputs ---------------------------------------------------------
 build/
 native-build/
+native-build-diag/
 build-deps/
 host-build/
 __pycache__/

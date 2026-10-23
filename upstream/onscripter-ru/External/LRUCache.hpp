@@ -100,6 +100,15 @@ public:
 	size_t size() {
 		return capacity;
 	}
+
+	/**
+	 * Visit every entry without changing the LRU order (diagnostics).
+	 */
+	template <class Visitor>
+	void forEach(Visitor visit) const {
+		for (const auto &entry : cache)
+			visit(entry.first, entry.second.first);
+	}
 	
 	
 	/**

@@ -74,6 +74,11 @@ target_include_directories(ons_vita_gpu PRIVATE
 target_compile_definitions(ons_vita_gpu PUBLIC VITA
   SDL_GPU_DISABLE_OPENGL SDL_GPU_DISABLE_GLES_1 SDL_GPU_DISABLE_GLES_3)
 target_compile_definitions(ons_vita_gpu PRIVATE SDL_GPU_USE_BUFFER_RESET)
+if(ONS_VITA_FILE_LOGGING)
+  # Diagnostic builds: live image/framebuffer census for the engine's log.
+  target_compile_definitions(ons_vita_gpu PRIVATE ONS_VITA_GPU_CENSUS)
+  target_compile_definitions(ons_vita_glsl_fix PRIVATE ONS_VITA_GPU_CENSUS)
+endif()
 # Every program is exported in the same translator binding order. Fingerprint
 # the whole corpus and driver, rather than mix stale binaries with new sources.
 set(ONS_SHADER_INPUTS ${ONS_RESOURCES}

@@ -34,6 +34,19 @@ inline bool settingsControl(const char *label, int id) {
 inline bool logJumpPrompt(const char *label, int id) {
     return label && std::string_view(label) == "log_jump_request" && id >= 2 && id <= 4;
 }
+// A chapter's "perform witchcraft to jump forward in time?" prompt: question
+// sprite 501 and the Cast/Don't cast buttons 503 and 504 (*scenario_jump_q2,
+// which *scenario_jump_q falls through to). The script centres them too.
+inline bool castSpellPrompt(const char *label, int id) {
+    if (!label || (id != 501 && id != 503 && id != 504)) return false;
+    const std::string_view name(label);
+    return name == "scenario_jump_q" || name == "scenario_jump_q2";
+}
+// Both prompts' text is small at the Vita's screen size.
+inline bool enlargedPrompt(const char *label, int id) {
+    return logJumpPrompt(label, id) || castSpellPrompt(label, id);
+}
+constexpr float PromptScale = 1.4f;
 // Largest scale, at most the requested one, keeping a sprite of the given
 // scaled width within the 1920-wide script screen with a 60px margin per side.
 inline float fitScale(float scale, float scaledWidth, float screenWidth) {
@@ -41,7 +54,7 @@ inline float fitScale(float scale, float scaledWidth, float screenWidth) {
     return scaledWidth > limit && scaledWidth > 0 ? scale * limit / scaledWidth : scale;
 }
 inline float imageScale(const char *filename, const char *label, int id) {
-    if (logJumpPrompt(label, id)) return 1.6f;
+    if (enlargedPrompt(label, id)) return PromptScale;
     switch (titlePart(filename)) {
         case TitlePart::Button: case TitlePart::Description: case TitlePart::PauseButton: return 1.25f;
         case TitlePart::TitleConfirmation:

@@ -36,6 +36,21 @@ template<class Link> static bool nativeSettingsButtons(const Link *link) {
 	}
 	return volume && speed && exit;
 }
+
+// The backlog's jump prompt (*log_jump_request_loop): Yes (spbtn 3,503) beside
+// No (spbtn 4,504), its only buttons. Recognised by those too, since on device
+// its left/right mapping did not take effect by the label alone.
+template<class Link> static bool nativeLogJumpPrompt(const LabelInfo *label, const Link *link) {
+	if (label && label->name && equalstr(label->name, "log_jump_request_loop"))
+		return true;
+	bool yes = false, no = false;
+	for (; link; link = link->next) {
+		if (link->no == 503 && link->sprite_no == 3) yes = true;
+		else if (link->no == 504 && link->sprite_no == 4) no = true;
+		else return false;
+	}
+	return yes && no;
+}
 #endif
 
 const uint32_t MAX_TOUCH_TAP_TIMESPAN{80};
@@ -121,6 +136,9 @@ void ONScripter::flushEventSub(SDL_Event &event) {
 		playSequencedMusic(seqmusic_play_loop_flag);
 	} else if (event.type == ONS_CHUNK_EVENT) { // for processing btntime2 and automode correctly
 		uint32_t ch = event.user.code;
+#ifdef VITA
+		nativeReleaseFinishedEffect(ch);
+#endif
 		if (wave_sample[ch]) {
 			if (ch >= ONS_MIX_CHANNELS || !channel_preloaded[ch]) {
 				//don't free preloaded channels
@@ -409,7 +427,13 @@ void ONScripter::waitEvent(int count, bool nopPreferred) {
 #ifdef VITA
 				nativeDrawPictureFocus();
 #endif
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+				const uint64_t flipStart = SDL_GetPerformanceCounter();
 				GPU_Flip(screen_target);
+				nativeNoteFramePresented(flipStart);
+#else
+				GPU_Flip(screen_target);
+#endif
 #ifdef VITA
 				VitaPlatform::releaseStartupImage();
 #endif
@@ -1436,6 +1460,45 @@ void ONScripter::translateKeyUpEvent(SDL_Event &event, EventProcessingState &sta
 		eventCallbackRequired = true;
 }
 
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+// Intervals between presented frames, while the screen keeps changing (a
+// longer gap is the engine idling, not a slow frame), and the time GPU_Flip
+// itself took (waiting for vsync or the GPU). Logged per 5 s window.
+void ONScripter::nativeNoteFramePresented(uint64_t flipStart) {
+	static uint64_t lastFlip{0}, windowStart{0};
+	static unsigned frames{0}, late20{0}, late34{0}, late50{0};
+	static double intervalSum{0}, intervalWorst{0}, flipSum{0}, flipWorst{0};
+	const uint64_t now       = SDL_GetPerformanceCounter();
+	const double toMs        = 1000.0 / static_cast<double>(SDL_GetPerformanceFrequency());
+	const double flipMs      = static_cast<double>(now - flipStart) * toMs;
+	const double intervalMs  = lastFlip ? static_cast<double>(now - lastFlip) * toMs : 0;
+	lastFlip                 = now;
+	if (!windowStart)
+		windowStart = now;
+	if (intervalMs > 0 && intervalMs < 250) {
+		frames++;
+		intervalSum += intervalMs;
+		intervalWorst = std::max(intervalWorst, intervalMs);
+		flipSum += flipMs;
+		flipWorst = std::max(flipWorst, flipMs);
+		late20 += intervalMs > 20;
+		late34 += intervalMs > 34;
+		late50 += intervalMs > 50;
+	}
+	if (static_cast<double>(now - windowStart) * toMs < 5000)
+		return;
+	if (frames >= 10)
+		sendToLog(LogLevel::Warn,
+		          "Frames %u: %u presented, interval mean %.1f worst %.1f ms, late >20 ms %u >34 ms %u >50 ms %u; "
+		          "flip mean %.1f worst %.1f ms\n",
+		          static_cast<unsigned>(SDL_GetTicks()), frames, intervalSum / frames, intervalWorst, late20, late34,
+		          late50, flipSum / frames, flipWorst);
+	windowStart = now;
+	frames = late20 = late34 = late50 = 0;
+	intervalSum = intervalWorst = flipSum = flipWorst = 0;
+}
+#endif
+
 bool ONScripter::mainThreadDowntimeProcessing(bool essentialProcessingOnly) {
 
 	bool didSomething{false};
@@ -1450,6 +1513,12 @@ bool ONScripter::mainThreadDowntimeProcessing(bool essentialProcessingOnly) {
 	if (allow_rendering && !essentialProcessingOnly) {
 		didSomething |= gpu.handleScheduledJobs();
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	if (allow_rendering && SDL_GetTicks() - nativeLastCensus >= 30000) {
+		nativeLastCensus = SDL_GetTicks();
+		nativeResourceCensus();
+	}
+#endif
 
 	return didSomething;
 }
@@ -1639,6 +1708,55 @@ void ONScripter::nativeNavigatePictureGrid(SDL_Scancode code) {
 	}
 }
 
+// The omake mansion's rooms (*omakeeee_*) are btn hotspots over the
+// background. Most have no highlight art (the doors, the sofa that leaves the
+// mansion): on PC the mouse pointer shows where it is.
+bool ONScripter::nativeMansionActive() const {
+	if (!current_label_info || !current_label_info->name ||
+	    std::strncmp(current_label_info->name, "omakeeee_", 9) != 0) return false;
+	for (auto link = root_button_link.next; link; link = link->next)
+		if (link->button_type == ButtonLink::NORMAL_BUTTON) return true;
+	return false;
+}
+
+// Moves to the nearest hotspot in the pressed direction. With nothing selected
+// it starts from the middle of the screen, or takes the hotspot nearest to it.
+void ONScripter::nativeNavigateMansion(SDL_Scancode code) {
+	auto usable = [](const ButtonLink *link) {
+		return link->button_type == ButtonLink::NORMAL_BUTTON && link->select_rect.w > 0 && link->select_rect.h > 0;
+	};
+	const ButtonLink *origin = nullptr;
+	for (auto link = root_button_link.next; link && !origin; link = link->next)
+		if (usable(link) && link->no == lastKnownHoveredButtonNumber) origin = link;
+	float x = window.script_width * .5f, y = window.script_height * .5f;
+	if (origin) {
+		x = origin->select_rect.x + origin->select_rect.w * .5f;
+		y = origin->select_rect.y + origin->select_rect.h * .5f;
+	}
+	bool horizontal = code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_RIGHT;
+	float sign = code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_UP ? -1.f : 1.f;
+	ButtonLink *best = nullptr, *nearest = nullptr;
+	int bestIndex = -1, nearestIndex = -1, index = 0;
+	float bestScore = 1e30f, nearestDistance = 1e30f;
+	for (auto link = root_button_link.next; link; link = link->next, ++index) {
+		if (!usable(link) || (origin && link->no == origin->no) || buttonNumberToLinkIndex(link->no) != index) continue;
+		const auto &t = link->select_rect;
+		float dx = t.x + t.w * .5f - x;
+		float dy = t.y + t.h * .5f - y;
+		if (dx * dx + dy * dy < nearestDistance) { nearest = link; nearestIndex = index; nearestDistance = dx * dx + dy * dy; }
+		float distance = (horizontal ? dx : dy) * sign;
+		float offset = std::fabs(horizontal ? dy : dx);
+		if (distance <= 1.f) continue;
+		float score = distance + 4.f * offset;
+		if (score < bestScore) { best = link; bestIndex = index; bestScore = score; }
+	}
+	if (!best && !origin) { best = nearest; bestIndex = nearestIndex; }
+	if (best) {
+		controlMode = ControlMode::Arrow;
+		doHoverButton(true, best->no, bestIndex, best);
+	}
+}
+
 int ONScripter::nativeConfirmButton() {
 	// Music Box and Message Browser arrows select a scrollable element, while
 	// ordinary button focus may remain on Exit or a scroll arrow. Confirm the
@@ -1739,8 +1857,7 @@ void ONScripter::nativeSeedTitleHover() {
 
 	// The backlog jump prompt opens with Yes (spbtn 3,503) focused; later
 	// btnwait2 rounds of the same prompt keep the player's choice.
-	bool jumpPrompt = current_label_info && current_label_info->name &&
-	                  equalstr(current_label_info->name, "log_jump_request_loop");
+	bool jumpPrompt = nativeLogJumpPrompt(current_label_info, root_button_link.next);
 	if (jumpPrompt && !nativeLogJumpHoverSeeded) {
 		int index = buttonNumberToLinkIndex(503);
 		if (index >= 0) {
@@ -1791,6 +1908,14 @@ void ONScripter::nativePrefilterKey(SDL_Event &event) {
 		event.type = SDL_FIRSTEVENT;
 		return;
 	}
+	if (!text && nativeMansionActive() &&
+	    (code == SDL_SCANCODE_UP || code == SDL_SCANCODE_DOWN ||
+	     code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_RIGHT)) {
+		current_button_state.reset();
+		if (event.type == SDL_KEYUP) nativeNavigateMansion(code);
+		event.type = SDL_FIRSTEVENT;
+		return;
+	}
 	if (nativeSettingsButtons(root_button_link.next) &&
 	    (code == SDL_SCANCODE_UP || code == SDL_SCANCODE_DOWN ||
 	     code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_RIGHT)) {
@@ -1802,13 +1927,17 @@ void ONScripter::nativePrefilterKey(SDL_Event &event) {
 		return;
 	}
 	// Backlog jump prompt: Yes/No side by side; Circle always answers No.
-	bool jumpPrompt = current_label_info && current_label_info->name &&
-	                  equalstr(current_label_info->name, "log_jump_request_loop");
-	if ((code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_RIGHT) && current_label_info &&
-	    current_label_info->name &&
-	    (equalstr(current_label_info->name, "scenario_jump_btnwait") ||
-	     equalstr(current_label_info->name, "scenario_jump_q3") || jumpPrompt))
+	bool jumpPrompt = nativeLogJumpPrompt(current_label_info, root_button_link.next);
+	if ((code == SDL_SCANCODE_LEFT || code == SDL_SCANCODE_RIGHT) &&
+	    (jumpPrompt || (current_label_info && current_label_info->name &&
+	                    (equalstr(current_label_info->name, "scenario_jump_btnwait") ||
+	                     equalstr(current_label_info->name, "scenario_jump_q3"))))) {
+#if defined(ONS_VITA_FILE_LOGGING)
+		sendToLog(LogLevel::Warn, "Prompt arrows: %s as up/down at *%s\n", code == SDL_SCANCODE_LEFT ? "left" : "right",
+		          current_label_info && current_label_info->name ? current_label_info->name : "?");
+#endif
 		code = code == SDL_SCANCODE_LEFT ? SDL_SCANCODE_UP : SDL_SCANCODE_DOWN;
+	}
 	// Triggers retain identity on Bookmarks, and use normal actions elsewhere.
 	if (!nativeBookmarkPageButton(0)) {
 		if (code == VitaInput::LeftTrigger) code = SDL_SCANCODE_H;

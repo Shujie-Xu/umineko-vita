@@ -2104,6 +2104,55 @@ int ONScripter::gotoCommand() {
 		sendToLog(LogLevel::Warn, "Log jump: asking to jump\n");
 #endif
 #if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: debug_redirect.txt sends every goto to one label on
+	// to another ("umi8_op d65489": starting episode 8 opens just before its
+	// ending) and sets numeric variables when the boot logos start, after the
+	// global save has loaded ("set omake_level 2": omake unlocked; global
+	// variables are then saved with it). '#' starts a comment line.
+	static std::vector<std::pair<std::string, std::string>> debugRedirects;
+	static bool debugRedirectsRead = false;
+	auto lower = [](std::string text) {
+		std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+		return text;
+	};
+	if (!debugRedirectsRead && equalstr(target + 1, "boot_logo")) {
+		debugRedirectsRead = true;
+		if (FILE *file = std::fopen("ux0:data/umineko-native/debug_redirect.txt", "r")) {
+			char line[256], first[128], second[128], third[32];
+			while (std::fgets(line, sizeof(line), file)) {
+				const int fields = std::sscanf(line, " %127s %127s %31s", first, second, third);
+				if (fields < 2 || first[0] == '#')
+					continue;
+				std::string from = lower(first[0] == '*' ? first + 1 : first);
+				std::string to   = lower(second[0] == '*' ? second + 1 : second);
+				int32_t no{0};
+				if (fields == 3 && from == "set") {
+					if (script_h.findNumAlias(to.c_str(), &no)) {
+						script_h.setNumVariable(no, std::atoi(third));
+						sendToLog(LogLevel::Warn, "Debug redirect: %%%s = %d\n", to.c_str(), std::atoi(third));
+					} else {
+						sendToLog(LogLevel::Error, "Debug redirect: no numalias %s\n", to.c_str());
+					}
+				} else if (script_h.hasLabel(to.c_str())) {
+					debugRedirects.emplace_back(from, to);
+				} else {
+					sendToLog(LogLevel::Error, "Debug redirect: no label *%s\n", to.c_str());
+				}
+			}
+			std::fclose(file);
+		}
+	}
+	if (!debugRedirects.empty()) {
+		const std::string label = lower(target + 1);
+		for (auto &redirect : debugRedirects) {
+			if (redirect.first != label)
+				continue;
+			sendToLog(LogLevel::Warn, "Debug redirect: *%s -> *%s\n", label.c_str(), redirect.second.c_str());
+			setCurrentLabel(redirect.second.c_str());
+			tryEndSuperSkip(false);
+			return RET_CONTINUE;
+		}
+	}
 	// Diagnostic builds: a label in debug_jump.txt replaces the first jump to
 	// the boot logos, so a late scene can be tested without replaying to it.
 	static bool debugJumpChecked = false;

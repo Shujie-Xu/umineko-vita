@@ -1546,6 +1546,15 @@ private:
 	bool nativeRunLoopPrefetch(const std::string &file);
 	void nativeAwaitPrefetchedLoop(const char *file, bool waitevent);
 	void nativeConsumePrefetchedLoop(const char *file);
+#if defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: memory, GPU images, framebuffers, pools and caches,
+	// logged every 30 s from the main thread's idle processing.
+	void nativeResourceCensus();
+	uint32_t nativeLastCensus{0};
+	// Diagnostic builds: frame pacing while the screen keeps changing, one
+	// log line per 5 s (Event.cpp). flipStart: the counter before GPU_Flip.
+	void nativeNoteFramePresented(uint64_t flipStart);
+#endif
 #endif
 	void setupAnimationInfo(AnimationInfo *anim, Fontinfo *info = nullptr);
 	void postSetupAnimationInfo(AnimationInfo *anim);
@@ -1659,12 +1668,23 @@ private:
 	bool nativeVoicePrefetchSlot{false};
 	void nativeKeepSoundEffect(int channel, const std::string &path);
 	bool nativeSoundEffectSlot{false};
+	// *meplay's channels 3-9 (*pam's opening songs on 9) and *seplay's 10-25.
+	// Their every dwaveplay(loop) directly follows its dwaveload, so a stopped
+	// or finished chunk is freed (Sound.cpp) rather than kept until the next
+	// load: 18-25 MiB per opening song. Voices (0-2, 43-46) keep the preload.
+	static bool nativeEffectChannel(uint32_t channel) {
+		return channel >= 3 && channel <= 25;
+	}
+	bool nativeEffectStarted[ONS_MIX_CHANNELS]{}; // dwaveplay since the load
+	void nativeReleaseFinishedEffect(uint32_t channel);
 	void nativeClearPendingLogVoice();
 	uint32_t nativeLineVoiceLabel{0xFFFFFFFF};
 	int nativeConfirmButton();
 	bool nativePictureButton(const ButtonLink *link) const;
 	bool nativePictureGridActive() const;
 	void nativeNavigatePictureGrid(SDL_Scancode code);
+	bool nativeMansionActive() const;
+	void nativeNavigateMansion(SDL_Scancode code);
 	void nativeDrawPictureFocus();
 	void nativeNavigateSettings(SDL_Scancode code);
 	int nativeBookmarkPageButton(int delta);

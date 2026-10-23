@@ -19,6 +19,9 @@
 #include "platform/vita/memory.hpp"
 extern "C" {
 #include "platform/vita/png_stream.h"
+#if defined(ONS_VITA_FILE_LOGGING)
+#include "platform/vita/gpu_render_targets.h"
+#endif
 extern int _newlib_heap_size_user; // platform.cpp
 }
 #include <psp2/kernel/threadmgr.h>
@@ -1260,12 +1263,11 @@ void ONScripter::drawBigImage(GPU_Target *target, AnimationInfo *info, int /*ref
 	{
 		// Diagnostic builds: the first draws of each big image, then one per
 		// ~2 s at 60 fps, with everything the clip and tile choice depend on.
-		static const GPUBigImage *lastImage{nullptr};
-		static unsigned draws{0};
-		if (info->big_image.get() != lastImage) {
-			lastImage = info->big_image.get();
-			draws     = 0;
-		}
+		// Counted per image: credits layer several, drawn alternately.
+		static std::unordered_map<const GPUBigImage *, unsigned> drawCounts;
+		if (drawCounts.size() > 32)
+			drawCounts.clear();
+		unsigned &draws = drawCounts[info->big_image.get()];
 		if (draws < 3 || draws % 120 == 0)
 			sendToLog(LogLevel::Warn,
 			          "BigImage draw %u: %ux%u pos %.0f,%.0f %.0fx%.0f bounds %.0f,%.0f %.0fx%.0f scale %.2f,%.2f "
@@ -1730,6 +1732,12 @@ void ONScripter::buildGPUImage(AnimationInfo &ai) {
 		else
 #endif
 			ai.gpu_image = gpu.copyImageFromSurface(ai.image_surface);
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+		static unsigned storageFailures{0};
+		if (!GPUController::hasTextureStorage(ai.gpu_image) && storageFailures++ < 16)
+			sendToLog(LogLevel::Error, "Census: image %s (%dx%d) got no texture storage\n",
+			          ai.file_name ? ai.file_name : "?", ai.image_surface->w, ai.image_surface->h);
+#endif
 
 		GPU_GetTarget(ai.gpu_image);
 		gpu.multiplyAlpha(ai.gpu_image);
@@ -2325,6 +2333,59 @@ void ONScripter::nativeReleasePrefetches() {
 		}
 	}
 }
+
+#if defined(ONS_VITA_FILE_LOGGING)
+// Diagnostic builds: what a long session accumulates. vitaGL has 256
+// framebuffer objects and every image with a target holds one; the GPU image
+// groups (largest first) show which kind of image grows between censuses.
+void ONScripter::nativeResourceCensus() {
+	VitaMemory::logBudget("census");
+	unsigned fbos{0}, fboFailures{0}, reclaims{0};
+	ons_vita_fbo_census(&fbos, &fboFailures, &reclaims);
+	unsigned images{0}, bigImages{0}, surfaces{0}, oldImages{0};
+	for (AnimationInfo *array : {sprite_info, sprite2_info}) {
+		for (int i = 0; i < MAX_SPRITE_NUM; i++) {
+			const AnimationInfo &ai = array[i];
+			images += ai.gpu_image != nullptr;
+			bigImages += ai.big_image != nullptr;
+			surfaces += ai.image_surface != nullptr;
+			oldImages += ai.old_ai && (ai.old_ai->gpu_image || ai.old_ai->big_image);
+		}
+	}
+	size_t cachedImages{0}, cachedImageBytes{0}, cachedSounds{0}, cachedSoundBytes{0}, glyphs{0};
+	{
+		Lock lock(&imageCache);
+		imageCache.forEach([&](int, const std::shared_ptr<Wrapped_SDL_Surface> &entry) {
+			if (entry && entry->surface) {
+				cachedImages++;
+				cachedImageBytes += static_cast<size_t>(entry->surface->pitch) * entry->surface->h;
+			}
+		});
+	}
+	{
+		Lock lock(&soundCache);
+		soundCache.forEach([&](int, const std::shared_ptr<Wrapped_Mix_Chunk> &entry) {
+			if (entry && entry->chunk) {
+				cachedSounds++;
+				cachedSoundBytes += entry->chunk->alen;
+			}
+		});
+	}
+	glyphCache.forEach([&](const GlyphParams &, GlyphValues *) { glyphs++; });
+	sendToLog(LogLevel::Warn,
+	          "Census %u: FBOs %u live (generation failures %u, GXM target reclaims %u); sprites: GPU image %u, "
+	          "big image %u, CPU surface %u, old_ai image %u; image cache %u (%u KiB), sound cache %u (%u KiB), glyphs %u\n",
+	          static_cast<unsigned>(SDL_GetTicks()), fbos, fboFailures, reclaims, images, bigImages, surfaces, oldImages,
+	          static_cast<unsigned>(cachedImages), static_cast<unsigned>(cachedImageBytes / 1024),
+	          static_cast<unsigned>(cachedSounds), static_cast<unsigned>(cachedSoundBytes / 1024),
+	          static_cast<unsigned>(glyphs));
+	gpu.logPoolCensus();
+	ons_vita_gpu_census_report();
+	// The log is fully buffered once Loader reopens it; closing the app from
+	// the home screen would otherwise drop everything since the last flush.
+	std::fflush(stderr);
+}
+#endif
 #endif
 
 void ONScripter::freeRedundantSurfaces(AnimationInfo &ai) {

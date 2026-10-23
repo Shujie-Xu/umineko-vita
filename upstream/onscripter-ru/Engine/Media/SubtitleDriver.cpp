@@ -376,8 +376,23 @@ int SubtitleDriver::extractFrame(std::vector<SubtitleImage> &images, uint64_t ti
 		subImg.y        = img->dst_y;
 		subImg.color    = img->color;
 
+#ifdef __vita__
+		// Tight rows plus one transparent column and row. The layer composes at
+		// render scale, where bilinear sampling at a bitmap's edge reaches one
+		// texel past it, into whatever an earlier line left in the texture
+		// (SubtitleLayer::renderImageSet). Tight rows also upload in one call
+		// instead of one per row (libass pads its stride).
+		subImg.linesize   = img->w + 1;
+		const size_t size = static_cast<size_t>(img->h + 1) * subImg.linesize;
+		subImg.buffer     = std::make_unique<uint8_t[]>(size);
+		for (int y = 0; y < img->h; y++)
+			std::memcpy(subImg.buffer.get() + static_cast<size_t>(y) * subImg.linesize,
+			            img->bitmap + static_cast<size_t>(y) * img->stride, img->w);
+		subImg.hash = VitaSubtitles::hash(subImg.buffer.get(), size);
+#else
 		subImg.buffer = std::make_unique<uint8_t[]>(img->h * img->stride);
 		std::memcpy(subImg.buffer.get(), img->bitmap, img->h * img->stride);
+#endif
 
 		images.emplace_back(std::move(subImg));
 
@@ -388,12 +403,12 @@ int SubtitleDriver::extractFrame(std::vector<SubtitleImage> &images, uint64_t ti
 }
 
 #ifdef __vita__
-bool SubtitleDriver::renderNativeOverlay(std::vector<uint8_t> &pixels, SDL_Rect &bounds, int width, int height, uint64_t timestamp) {
+bool SubtitleDriver::renderNativeOverlay(std::vector<uint8_t> &pixels, SDL_Rect &bounds, int width, int height, uint64_t timestamp, bool force) {
 	if (!ass_renderer || !ass_track) return false;
 	Lock lock(ass_track);
 	int changed = 0;
 	auto images = ass_render_frame(ass_renderer, ass_track, timestamp, &changed);
-	if (!changed) return false;
+	if (!changed && !force) return false;
 	auto region = VitaSubtitles::render(images, width, height, pixels);
 	bounds = {region.x, region.y, region.w, region.h};
 	return true;

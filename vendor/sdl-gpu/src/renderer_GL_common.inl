@@ -34,6 +34,105 @@ See a particular renderer's *.c file for specifics. */
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+#ifdef ONS_VITA_GPU_CENSUS
+/* Diagnostic builds: every live GPU_Image, for the periodic resource census
+ * (ons_vita_gpu_census_report). Each image's target holds one of vitaGL's
+ * 256 framebuffer objects. */
+#include <stdio.h>
+enum { ONS_CENSUS_CAPACITY = 4096 };
+static GPU_Image *ons_census_images[ONS_CENSUS_CAPACITY];
+static unsigned ons_census_untracked, ons_census_no_fbo, ons_census_incomplete_fbo;
+
+static void ons_census_add(GPU_Image *image)
+{
+    size_t i;
+    if (image == NULL)
+        return;
+    for (i = 0; i < ONS_CENSUS_CAPACITY; ++i)
+        if (ons_census_images[i] == NULL) {
+            ons_census_images[i] = image;
+            return;
+        }
+    ons_census_untracked++;
+}
+
+static void ons_census_remove(GPU_Image *image)
+{
+    size_t i;
+    for (i = 0; i < ONS_CENSUS_CAPACITY; ++i)
+        if (ons_census_images[i] == image) {
+            ons_census_images[i] = NULL;
+            return;
+        }
+    if (ons_census_untracked)
+        ons_census_untracked--;
+}
+
+void ons_vita_gpu_census_report(void)
+{
+    enum { BUCKETS = 256, SHOWN = 24 };
+    struct { unsigned w, h, bpp, target, alias, count; unsigned long bytes; } buckets[BUCKETS];
+    unsigned bucket_count = 0, images = 0, targets = 0, aliases = 0, overflow = 0;
+    unsigned long bytes = 0;
+    size_t i, j;
+    for (i = 0; i < ONS_CENSUS_CAPACITY; ++i) {
+        GPU_Image *image = ons_census_images[i];
+        unsigned long size;
+        if (image == NULL)
+            continue;
+        images++;
+        targets += image->target != NULL;
+        aliases += image->is_alias != 0;
+        size = image->is_alias ? 0 : (unsigned long)image->texture_w * image->texture_h * image->bytes_per_pixel;
+        bytes += size;
+        for (j = 0; j < bucket_count; ++j)
+            if (buckets[j].w == image->texture_w && buckets[j].h == image->texture_h &&
+                buckets[j].bpp == (unsigned)image->bytes_per_pixel &&
+                buckets[j].target == (image->target != NULL) && buckets[j].alias == (image->is_alias != 0))
+                break;
+        if (j == bucket_count) {
+            if (bucket_count == BUCKETS) {
+                overflow++;
+                continue;
+            }
+            buckets[j].w = image->texture_w;
+            buckets[j].h = image->texture_h;
+            buckets[j].bpp = image->bytes_per_pixel;
+            buckets[j].target = image->target != NULL;
+            buckets[j].alias = image->is_alias != 0;
+            buckets[j].count = 0;
+            buckets[j].bytes = 0;
+            bucket_count++;
+        }
+        buckets[j].count++;
+        buckets[j].bytes += size;
+    }
+    fprintf(stderr, "Census GPU images: %u live (%u with targets, %u aliases, %u untracked), %lu KiB; "
+                    "GetTarget failures: %u no FBO, %u incomplete\n",
+            images, targets, aliases, ons_census_untracked, bytes / 1024, ons_census_no_fbo,
+            ons_census_incomplete_fbo);
+    /* Largest groups first: a growing group names the leaking kind of image. */
+    for (i = 0; i < SHOWN && i < bucket_count; ++i) {
+        size_t best = i;
+        for (j = i + 1; j < bucket_count; ++j)
+            if (buckets[j].bytes > buckets[best].bytes ||
+                (buckets[j].bytes == buckets[best].bytes && buckets[j].count > buckets[best].count))
+                best = j;
+        if (best != i) {
+            __typeof__(buckets[0]) swap = buckets[i];
+            buckets[i] = buckets[best];
+            buckets[best] = swap;
+        }
+        fprintf(stderr, "Census   %4ux%-4u %ubpp%s%s x%u = %lu KiB\n", buckets[i].w, buckets[i].h,
+                buckets[i].bpp, buckets[i].target ? " target" : "", buckets[i].alias ? " alias" : "",
+                buckets[i].count, buckets[i].bytes / 1024);
+    }
+    if (bucket_count > SHOWN || overflow)
+        fprintf(stderr, "Census   ... %u more groups, %u images not grouped\n",
+                bucket_count > SHOWN ? bucket_count - SHOWN : 0, overflow);
+}
+#endif
+
 #ifndef PI
 #define PI 3.1415926f
 #endif
@@ -2488,6 +2587,9 @@ static GPU_Image* CreateUninitializedImage(GPU_Renderer* renderer, Uint16 w, Uin
     result->texture_w = w;
     result->texture_h = h;
 
+#ifdef ONS_VITA_GPU_CENSUS
+    ons_census_add(result);
+#endif
     return result;
 }
 
@@ -2759,6 +2861,9 @@ static GPU_Image* CreateImageUsingTexture(GPU_Renderer* renderer, GPU_TextureHan
     result->texture_w = (Uint16)w;
     result->texture_h = (Uint16)h;
 
+#ifdef ONS_VITA_GPU_CENSUS
+    ons_census_add(result);
+#endif
     return result;
     #endif
 }
@@ -2781,6 +2886,9 @@ static GPU_Image* CreateAliasImage(GPU_Renderer* renderer, GPU_Image* image)
     result->refcount = 1;
     result->is_alias = GPU_TRUE;
 
+#ifdef ONS_VITA_GPU_CENSUS
+    ons_census_add(result);
+#endif
     return result;
 }
 
@@ -4060,6 +4168,9 @@ static void FreeImage(GPU_Renderer* renderer, GPU_Image* image)
         SDL_free(data);
     }
 
+#ifdef ONS_VITA_GPU_CENSUS
+    ons_census_remove(image);
+#endif
     SDL_free(image);
 }
 
@@ -4085,6 +4196,11 @@ static GPU_Target* GetTarget(GPU_Renderer* renderer, GPU_Image* image)
     glGenFramebuffersPROC(1, &handle);
     if(handle == 0)
     {
+#ifdef ONS_VITA_GPU_CENSUS
+        if (ons_census_no_fbo++ < 8)
+            fprintf(stderr, "Census: GPU_GetTarget got no framebuffer object for a %ux%u %ubpp image\n",
+                    image->texture_w, image->texture_h, image->bytes_per_pixel);
+#endif
         GPU_PushErrorCode("GPU_GetTarget", GPU_ERROR_BACKEND_ERROR, "No framebuffer object available.");
         return NULL;
     }
@@ -4096,6 +4212,12 @@ static GPU_Target* GetTarget(GPU_Renderer* renderer, GPU_Image* image)
     status = glCheckFramebufferStatusPROC(GL_FRAMEBUFFER);
     if(status != GL_FRAMEBUFFER_COMPLETE)
     {
+#ifdef ONS_VITA_GPU_CENSUS
+        /* The framebuffer object generated above is not deleted here. */
+        if (ons_census_incomplete_fbo++ < 8)
+            fprintf(stderr, "Census: GPU_GetTarget framebuffer incomplete (0x%x) for a %ux%u %ubpp image\n",
+                    status, image->texture_w, image->texture_h, image->bytes_per_pixel);
+#endif
         GPU_PushErrorCode("GPU_GetTarget", GPU_ERROR_DATA_ERROR, "Framebuffer incomplete with status: 0x%x.  Format 0x%x for framebuffers might not be supported on this hardware.", status, ((GPU_IMAGE_DATA*)image->data)->format);
         return NULL;
     }

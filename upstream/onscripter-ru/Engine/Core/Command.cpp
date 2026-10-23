@@ -1084,6 +1084,12 @@ int ONScripter::savescreenshotCommand() {
 		gpu.freeImage(screenshot_gpu);
 		screenshot_gpu = nullptr;
 	}
+#if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: memory after each image the first launch's font
+	// caching saves (*load_font_preference).
+	sendToLog(LogLevel::Warn, "Screenshot saved: %s\n", filename);
+	nativeResourceCensus();
+#endif
 
 	return RET_CONTINUE;
 }
@@ -1787,9 +1793,9 @@ int ONScripter::lspCommand() {
 			UpdateAnimPosXY(&anim);
 		}
 	}
-	// The enlarged backlog jump prompt must stay on screen: shrink a line too
-	// wide at full scale (longer translations) and render it once more.
-	if (VitaMenu::logJumpPrompt(menuLabel, no)) {
+	// The enlarged prompts must stay on screen: shrink a line too wide at full
+	// scale (longer translations) and render it once more.
+	if (VitaMenu::enlargedPrompt(menuLabel, no)) {
 		auto &anim = sprite_info[no];
 		const float fit = VitaMenu::fitScale(anim.native_menu_scale, anim.pos.w, window.script_width);
 		if (fit < anim.native_menu_scale) {
@@ -2754,6 +2760,9 @@ int ONScripter::dwaveCommand() {
 				errorAndExit("Cannot play a not loaded channel");
 			Mix_PlayChannel(ch, wave_sample[ch]->chunk, loop_flag ? -1 : 0);
 		}
+#ifdef VITA
+		nativeEffectStarted[ch] = true; // see nativeReleaseFinishedEffect
+#endif
 	} else {
 		const char *buf = script_h.readFilePath();
 #ifdef VITA
@@ -3614,6 +3623,19 @@ int ONScripter::btnCommand() {
 		gpu.copyGPUImage(btndef_info.gpu_image, &src_rect, nullptr, button->anim->gpu_image->target);
 		GPU_SetBlending(btndef_info.gpu_image, true);
 	}
+#ifdef VITA
+	// The controller focus frame (nativeDrawPictureFocus) needs 24 pixels
+	// across; the omake mansion's far doors are 10. A hover redraws
+	// image_rect, which must cover the frame to erase it when focus moves.
+	auto widen = [](float &pos, float &size) {
+		if (size > 0 && size < 24) {
+			pos -= (24 - size) / 2;
+			size = 24;
+		}
+	};
+	widen(button->image_rect.x, button->image_rect.w);
+	widen(button->image_rect.y, button->image_rect.h);
+#endif
 
 	root_button_link.insert(button);
 

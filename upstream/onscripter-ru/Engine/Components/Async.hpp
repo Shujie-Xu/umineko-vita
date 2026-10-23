@@ -35,6 +35,8 @@ public:
 
 	SDL_sem *instructionsWaiting{nullptr}, *resultsWaiting{nullptr};
 	SDL_Thread *thread{nullptr};
+	// The last thread started, joined when the next one starts (see queue()).
+	SDL_Thread *startedThread{nullptr};
 	const char *name{nullptr};
 	bool quitOnEmpty{true};
 	bool hasQueue{true};

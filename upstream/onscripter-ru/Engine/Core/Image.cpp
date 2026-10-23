@@ -1125,8 +1125,12 @@ void ONScripter::nativeDrawPictureFocus() {
 	// must not erase the frame. Controller focus survives temporary hover resets.
 	int selected = hoveringButton ? hoveredButtonNumber :
 	    controlMode == ControlMode::Arrow ? lastKnownHoveredButtonNumber : -1;
+	// Omake mansion hotspots too: most have no highlight art (see
+	// nativeMansionActive), so the d-pad's selection would be invisible.
+	bool mansion = selected != -1 && nativeMansionActive();
 	for (auto link = root_button_link.next; link; link = link->next) {
-		if (link->no != selected || !nativePictureButton(link)) continue;
+		if (link->no != selected ||
+		    !(nativePictureButton(link) || (mansion && link->button_type == ButtonLink::NORMAL_BUTTON))) continue;
 		const auto &r = link->image_rect;
 		float offsetX = 0, offsetY = 0;
 		GPU_Rect *clip = nullptr;

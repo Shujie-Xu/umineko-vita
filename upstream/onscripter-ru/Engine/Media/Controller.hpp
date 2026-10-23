@@ -346,6 +346,33 @@ private:
 	GPU_Image *nativeYuvImage{nullptr}, *nativeSubtitleImage{nullptr};
 	SDL_Rect nativeSubtitleBounds{};
 	std::vector<uint8_t> nativeSubtitlePixels;
+	// An .ass file over a natively decoded movie: libass renders on its own
+	// thread (nativeSubtitleLoop), ahead of the picture, and
+	// presentNativeFrame only uploads the overlays that are due.
+	struct NativeOverlay {
+		uint64_t timestamp; // ms
+		SDL_Rect bounds;
+		std::vector<uint8_t> pixels;
+	};
+	SDL_Thread *nativeSubtitleThread{nullptr};
+	SDL_mutex *nativeOverlayMutex{nullptr}; // guards the two below
+	std::deque<NativeOverlay> nativeOverlays;
+	bool nativeSubtitleRestart{false};
+	std::atomic<bool> nativeSubtitleStop{false};
+	std::atomic<uint64_t> nativeSubtitleShown{0}; // timestamp of the newest presented picture, ms
+	int nativeSubtitleWidth{0}, nativeSubtitleHeight{0};
+	bool nativeSubtitleFile{false};
+	uint64_t nativeSubtitleStepUs{33333};
+#if defined(ONS_VITA_FILE_LOGGING)
+	int nativeMainThread{0};
+	std::atomic<uint32_t> nativeApplyUs{0}, nativeApplyWorstUs{0}, nativeApplies{0};
+#endif
+	static int nativeSubtitleLoop(void *data);
+	void startNativeSubtitles();
+	void stopNativeSubtitles();
+	void restartNativeSubtitles();
+	bool takeNativeOverlay(uint64_t now);
+	void blendNativeOverlay(SDL_Surface *surface);
 #endif
 	bool alphaMasked{false};       // alpha in the bottom
 	bool loopVideo{false};         // loop the video file

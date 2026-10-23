@@ -15,10 +15,14 @@ static unsigned resource_failure_count;
 int __real_sceGxmCreateRenderTarget(const SceGxmRenderTargetParams *, SceGxmRenderTarget **);
 int __wrap_sceGxmCreateRenderTarget(const SceGxmRenderTargetParams *params, SceGxmRenderTarget **target) {
     int result = __real_sceGxmCreateRenderTarget(params, target);
-    /* The SDK retains one scarce GXM target per cached FBO. Recover metadata
-     * from a completed inactive FBO, preserving its texture, then retry once. */
-    if (result == (int)SCE_GXM_ERROR_OUT_OF_RENDER_TARGETS &&
-        ons_vita_reclaim_render_target(target))
+    /* The SDK retains one scarce GXM target per cached FBO, and the driver
+     * allocates each target from the few MiB of system memory left outside
+     * the heap and vitaGL's pools. Recover metadata from completed inactive
+     * FBOs, preserving their textures, and retry. A target that is not
+     * created leaves every draw into its texture silently lost. */
+    for (int attempt = 0; attempt < 8 &&
+         (result == (int)SCE_GXM_ERROR_OUT_OF_RENDER_TARGETS || result == (int)SCE_GXM_ERROR_OUT_OF_MEMORY) &&
+         ons_vita_reclaim_render_target(target); ++attempt)
         result = __real_sceGxmCreateRenderTarget(params, target);
     if (result < 0 && resource_failure_count++ < 16)
         fprintf(stderr, "Native GXM create target failed: 0x%08x size=%ux%u scenes=%u\n",

@@ -19,8 +19,8 @@ This repository contains a PS Vita port of the **[Umineko Project](https://www.u
 
 The engine has been **heavily modified and optimized for the PS Vita**: hardware video decoding through the Vita's native media framework, a rewritten textbox and HUD presentation pipeline, memory allocation and loading-time optimizations, and assets tailored specifically for the Vita's display and hardware limits.
 
-> **About Version 1.3:**
-> Version 1.3 requires **Hotfix v2** (see step 4 below).
+> **About Version 1.4:**
+> Version 1.4 requires **Hotfix v2** (see step 4 below).
 >
 > The porting work was executed with AI assistance and supervised and tested on real hardware by a human. Parts of every chapter, menus, saving/loading, and videos have been verified on hardware, but **the full game has not been play-tested from start to finish**. If you encounter an issue (a crash, stuck scene, or graphical glitch), please [open an issue](https://github.com/stoicpingu/umineko-vita/issues) detailing where in the story it occurred.
 

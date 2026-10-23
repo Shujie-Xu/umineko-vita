@@ -25,6 +25,7 @@
 
 #include <cstdio>
 #ifdef VITA
+#include <algorithm>
 #include <cstring>
 #include <malloc.h>
 #include <strings.h>
@@ -121,6 +122,152 @@ static long oc_tell_func(void *datasource) {
 
 	return static_cast<long>(ogg_vorbis_info->pos);
 }
+
+#ifdef VITA
+// A silent chunk for a channel that must stay loaded (dwaveplay ends the game
+// on an empty one): whole frames for any mixer format, and enough for
+// loadLips' first sample read; QuickLoad chunks never free this buffer.
+static Mix_Chunk *nativeSilentChunk() {
+	alignas(8) static Uint8 silence[16]{};
+	return Mix_QuickLoad_RAW(silence, sizeof(silence));
+}
+
+enum class NativeOggDecode { Unsupported, OutOfMemory, Decoded };
+
+// Mix_LoadWAV_RW decodes an Ogg (Mix_LoadMusic_RW, inlined into it in the
+// SDK's mixer.c) into a list of device-buffer-sized fragments, then
+// SDL_mallocs the whole PCM and copies them in: twice the PCM at its peak
+// (44 MiB for ep5_op.ogg's 22 MiB of 48 kHz stereo), half of it in one block
+// and the fragments scattered through the heap. This decodes as music_ogg.c
+// does (ov_read to native 16-bit, an SDL_AudioStream to the mixer format)
+// straight into one block sized from ov_pcm_total, the only large allocation:
+// the peak is the chunk plus a few small buffers. The chunk is what
+// Mix_LoadWAV_RW returns: SDL_malloc'd abuf in the mixer format, volume 128,
+// allocated = 1, so Mix_FreeChunk SDL_frees both. Unsupported: not a
+// single-format Ogg Vorbis stream (or no audio); Mix_LoadWAV_RW decides.
+// peakBytes: diagnostic builds, the heap growth at the decode's high point.
+static NativeOggDecode nativeDecodeOggChunk(uint8_t *data, size_t length, Mix_Chunk *&result, size_t &peakBytes) {
+	result    = nullptr;
+	peakBytes = 0;
+	int freq{0}, channels{0};
+	Uint16 format{0};
+	if (length < 4 || std::memcmp(data, "OggS", 4) || !Mix_QuerySpec(&freq, &format, &channels))
+		return NativeOggDecode::Unsupported;
+#if defined(ONS_VITA_FILE_LOGGING)
+	const auto heapUse     = [] { return static_cast<size_t>(mallinfo().uordblks) + VitaMemory::spilledBytes(); };
+	const size_t heapStart = heapUse();
+#endif
+	const int frameBytes = SDL_AUDIO_BITSIZE(format) / 8 * channels;
+	// The decoder state (a plain C struct of about 1 KiB) stays off the
+	// sound threads' stacks.
+	auto *ovi = static_cast<OVInfo *>(SDL_calloc(1, sizeof(OVInfo)));
+	if (!ovi) {
+		SDL_OutOfMemory();
+		return NativeOggDecode::OutOfMemory;
+	}
+	ovi->buf    = data;
+	ovi->length = static_cast<ogg_int64_t>(length);
+	ov_callbacks oc;
+	oc.read_func  = oc_read_func;
+	oc.seek_func  = oc_seek_func;
+	oc.close_func = nullptr;
+	oc.tell_func  = oc_tell_func;
+	if (ov_open_callbacks(ovi, &ovi->ovf, nullptr, 0, oc) < 0) {
+		SDL_free(ovi); // A failed open clears what it set up.
+		return NativeOggDecode::Unsupported;
+	}
+	OggVorbis_File *vf    = &ovi->ovf;
+	const vorbis_info *vi = ov_info(vf, 0);
+	bool uniform          = vi && vi->channels > 0 && vi->rate > 0;
+	for (long link = 1; uniform && link < ov_streams(vf); link++) {
+		const vorbis_info *other = ov_info(vf, link);
+		uniform                  = other && other->channels == vi->channels && other->rate == vi->rate;
+	}
+	// SDL_AudioStream rounds each put's output down and the flush's up, so
+	// the converted length never passes the source length scaled to the
+	// mixer rate by more than a frame; the slack covers that.
+	const ogg_int64_t sourceFrames = uniform ? ov_pcm_total(vf, -1) : -1;
+	const uint64_t capacity =
+	    sourceFrames > 0 ? ((static_cast<uint64_t>(sourceFrames) * freq + vi->rate - 1) / vi->rate + 1024) * frameBytes : 0;
+	if (!capacity || capacity > SDL_MAX_SINT32) {
+		ov_clear(vf);
+		SDL_free(ovi);
+		return NativeOggDecode::Unsupported;
+	}
+
+	// A file already in the mixer format is read straight into the chunk.
+	const bool direct = vi->rate == freq && vi->channels == channels && format == AUDIO_S16SYS;
+	constexpr int pieceBytes{16 * 1024};
+	SDL_AudioStream *stream = direct ? nullptr : SDL_NewAudioStream(AUDIO_S16SYS, static_cast<Uint8>(vi->channels), static_cast<int>(vi->rate), format, static_cast<Uint8>(channels), freq);
+	char *piece             = direct ? nullptr : static_cast<char *>(SDL_malloc(pieceBytes));
+	auto *chunk             = static_cast<Mix_Chunk *>(SDL_malloc(sizeof(Mix_Chunk)));
+	Uint8 *pcm              = chunk && (direct || (stream && piece)) ? static_cast<Uint8 *>(SDL_malloc(capacity)) : nullptr;
+	size_t filled{0};
+	bool ok{pcm != nullptr}, full{false};
+	// Converted audio goes into the chunk in whole frames. Past the block
+	// (were ov_pcm_total to understate the stream) the rest is dropped.
+	auto drain = [&]() {
+		int available{0};
+		while ((available = SDL_AudioStreamAvailable(stream)) > 0) {
+			int take = static_cast<int>(std::min<uint64_t>(static_cast<uint64_t>(available), capacity - filled));
+			take -= take % frameBytes;
+			if (take <= 0) {
+				full = true;
+				return true;
+			}
+			const int got = SDL_AudioStreamGet(stream, pcm + filled, take);
+			if (got < 0)
+				return false;
+			if (got == 0)
+				break;
+			filled += static_cast<size_t>(got);
+		}
+		return true;
+	};
+	int section{0};
+	while (ok && !full) {
+		char *into     = direct ? reinterpret_cast<char *>(pcm + filled) : piece;
+		const int room = direct ? static_cast<int>(std::min<uint64_t>(pieceBytes, capacity - filled)) : pieceBytes;
+		const long got = room > 0 ? ov_read(vf, into, room, SDL_BYTEORDER == SDL_BIG_ENDIAN, 2, 1, &section) : 0;
+		// 0 is the end; like music_ogg.c's OGG_GetSome, a decode error ends
+		// the sound there too, keeping what came before.
+		if (got <= 0) {
+			ok = !stream || (SDL_AudioStreamFlush(stream) == 0 && drain());
+			break;
+		}
+		if (direct)
+			filled += static_cast<size_t>(got);
+		else
+			ok = SDL_AudioStreamPut(stream, piece, static_cast<int>(got)) == 0 && drain();
+	}
+#if defined(ONS_VITA_FILE_LOGGING)
+	const size_t heapPeak = heapUse();
+	peakBytes             = heapPeak > heapStart ? heapPeak - heapStart : 0;
+#endif
+	ov_clear(vf);
+	SDL_free(ovi);
+	SDL_FreeAudioStream(stream);
+	SDL_free(piece);
+	if (!ok || !filled) {
+		if (!pcm)
+			SDL_OutOfMemory();
+		SDL_free(pcm);
+		SDL_free(chunk);
+		return ok ? NativeOggDecode::Unsupported : NativeOggDecode::OutOfMemory;
+	}
+	// Ended early (a decode error): newlib shrinks in place; a block spilled
+	// into vitaGL's pools moves, if there is room.
+	if (capacity - filled >= 64 * 1024)
+		if (void *smaller = SDL_realloc(pcm, filled))
+			pcm = static_cast<Uint8 *>(smaller);
+	chunk->allocated = 1;
+	chunk->abuf      = pcm;
+	chunk->alen      = static_cast<Uint32>(filled);
+	chunk->volume    = MIX_MAX_VOLUME;
+	result           = chunk;
+	return NativeOggDecode::Decoded;
+}
+#endif
 
 void ONScripter::loadSoundIntoCache(int id, const std::string &filename_str, bool async) {
 
@@ -268,10 +415,7 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 	    channel < ONS_MIX_CHANNELS && std::strlen(filename) > 12 &&
 	    !strncasecmp(filename, "sound", 5) && !strncasecmp(filename + 6, "voice", 5) &&
 	    (filename[5] == '\\' || filename[5] == '/') && (filename[11] == '\\' || filename[11] == '/')) {
-		// Whole frames for any mixer format, and enough for loadLips' first
-		// sample read; QuickLoad chunks never free this buffer.
-		alignas(8) static Uint8 silence[16]{};
-		Mix_Chunk *chunk = Mix_QuickLoad_RAW(silence, sizeof(silence));
+		Mix_Chunk *chunk = nativeSilentChunk();
 		if (chunk && playWave(std::make_shared<Wrapped_Mix_Chunk>(chunk), format, loop_flag, channel) == 0)
 			return SOUND_CHUNK;
 	}
@@ -299,13 +443,17 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 	// Diagnostic builds: the sound thread's read and decode time per file.
 	const auto readMs = SDL_GetTicks() - timingStart;
 	timingStart += readMs;
-	auto logSoundTiming = [&](const char *stage, unsigned decodedKiB) {
+	// peakKiB: the heap growth during nativeDecodeOggChunk, 0 if not measured.
+	auto logSoundTiming = [&](const char *stage, unsigned decodedKiB, unsigned peakKiB) {
 		const auto stageMs = SDL_GetTicks() - timingStart;
+		char peak[32]{};
+		if (peakKiB)
+			std::snprintf(peak, sizeof(peak), ", peak +%u KiB", peakKiB);
 		if (readMs + stageMs >= 5)
-			sendToLog(LogLevel::Warn, "Timing %u: sound %s (channel %d): read %u ms (%u KiB), %s %u ms (%u KiB)\n",
+			sendToLog(LogLevel::Warn, "Timing %u: sound %s (channel %d): read %u ms (%u KiB), %s %u ms (%u KiB%s)\n",
 			          static_cast<unsigned>(SDL_GetTicks()), filename,
 			          channel, static_cast<unsigned>(readMs), static_cast<unsigned>(length / 1024), stage,
-			          static_cast<unsigned>(stageMs), decodedKiB);
+			          static_cast<unsigned>(stageMs), decodedKiB, peak);
 	};
 #endif
 
@@ -407,7 +555,7 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 
 		Mix_Music *music_info_local = Mix_LoadMUS_RW(SDL_RWFromMem(m_buf, static_cast<int>(m_len)), 0);
 #if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
-		logSoundTiming("stream open", 0);
+		logSoundTiming("stream open", 0, 0);
 #endif
 
 		if (music_info_local) {
@@ -520,8 +668,20 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 	}
 
 	if (format & SOUND_CHUNK) {
-		Mix_Chunk *chunk = Mix_LoadWAV_RW(SDL_RWFromMem(buffer, static_cast<int>(length)), 1);
 #ifdef VITA
+		// Oggs decode into one block of their final size; anything else, and
+		// Ogg streams nativeDecodeOggChunk leaves alone, as before.
+		size_t decodePeak{0};
+		const char *decoder{"ogg decode"};
+		auto decode = [&]() {
+			Mix_Chunk *decoded{nullptr};
+			if (nativeDecodeOggChunk(buffer, length, decoded, decodePeak) == NativeOggDecode::Unsupported) {
+				decoder = "decode";
+				decoded = Mix_LoadWAV_RW(SDL_RWFromMem(buffer, static_cast<int>(length)), 1);
+			}
+			return decoded;
+		};
+		Mix_Chunk *chunk = decode();
 		const bool cacheOnly{channel == MIX_CACHE_CHANNEL_BLOCK || channel == MIX_CACHE_CHANNEL_ASYNC};
 		if (!chunk && cacheOnly) {
 			// Caching is optional; loadSoundIntoCache logs and carries on.
@@ -530,29 +690,40 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 			return SOUND_NONE;
 		}
 		if (!chunk) {
-			// The whole Ogg is decoded to 48 kHz stereo and copied into one
-			// contiguous block (5.9 MiB for a 32 s 22 kHz mono ME), which a full
-			// or fragmented 192 MiB newlib heap may not have. Retry once
-			// without the decoded-sound cache and the lookahead prefetches
-			// before giving up.
+			// The whole sound is decoded to 48 kHz stereo in one contiguous
+			// block (5.9 MiB for a 32 s 22 kHz mono ME, 22 MiB for ep5_op),
+			// which a full or fragmented 192 MiB newlib heap may not have.
+			// Retry once without the lookahead prefetches, the image cache
+			// (CPU surfaces in the same heap; with object caching off it holds
+			// little more than the prefetches) and the decoded-sound cache.
+			// GPU-side reclaim (reclaimMemoryForTexture) needs the render
+			// thread and only frees vitaGL's pools, the spill route.
+			nativeReleasePrefetches();
+			{
+				Lock lock(&imageCache);
+				imageCache.clearAll();
+			}
 			{
 				Lock lock(&soundCache);
 				soundCache.clearAll();
 			}
-			nativeReleasePrefetches();
-			chunk = Mix_LoadWAV_RW(SDL_RWFromMem(buffer, static_cast<int>(length)), 1);
+			chunk = decode();
 		}
+#else
+		Mix_Chunk *chunk = Mix_LoadWAV_RW(SDL_RWFromMem(buffer, static_cast<int>(length)), 1);
 #endif
 #if defined(VITA) && defined(ONS_VITA_FILE_LOGGING)
-		logSoundTiming("decode", chunk ? static_cast<unsigned>(chunk->alen / 1024) : 0);
+		logSoundTiming(decoder, chunk ? static_cast<unsigned>(chunk->alen / 1024) : 0,
+		               static_cast<unsigned>(decodePeak / 1024));
 #endif
 		if (!chunk) {
 			char errBuf[MAX_ERRBUF_LEN];
 #ifdef VITA
 			// Release builds have no log file: put the memory state in the
-			// dialog so a screenshot tells heap exhaustion (little free) from
-			// fragmentation, and shows whether full vitaGL pools pushed
-			// textures into the newlib heap (vitaGL's use_extra_mem fallback).
+			// message (the dialog, should even silence fail) so a screenshot
+			// tells heap exhaustion (little free) from fragmentation, and
+			// shows whether full vitaGL pools pushed textures into the newlib
+			// heap (vitaGL's use_extra_mem fallback).
 			struct mallinfo mi = mallinfo();
 			std::snprintf(errBuf, MAX_ERRBUF_LEN,
 			              "error playing sound '%s': %s (heap used %lu KiB, free %lu KiB; GL free RAM %lu KiB, VRAM %lu KiB)\n",
@@ -560,6 +731,16 @@ int ONScripter::playSound(const char *filename, int format, bool loop_flag, int 
 			              static_cast<unsigned long>(mi.fordblks / 1024),
 			              static_cast<unsigned long>(vglMemFree(VGL_MEM_RAM) / 1024),
 			              static_cast<unsigned long>(vglMemFree(VGL_MEM_VRAM) / 1024));
+			// Going on without this ME, SE or voice beats ending the game:
+			// load silence, as the skip path above does, so dwaveplay still
+			// finds the channel loaded (SOUND_NONE would make it end the game
+			// with "Cannot play a not loaded channel").
+			sendToLog(LogLevel::Error, "%s", errBuf);
+			Mix_Chunk *silent = nativeSilentChunk();
+			if (silent && playWave(std::make_shared<Wrapped_Mix_Chunk>(silent), format, loop_flag, channel) == 0) {
+				freearr(&buffer);
+				return SOUND_CHUNK;
+			}
 #else
 			std::snprintf(errBuf, MAX_ERRBUF_LEN, "error playing sound '%s': %s\n", filename, Mix_GetError());
 #endif
@@ -645,6 +826,10 @@ int ONScripter::playWave(const std::shared_ptr<Wrapped_Mix_Chunk> &chunk, int fo
 	Lock lock(&playSoundThreadedLock);
 	Mix_Pause(channel);
 	wave_sample[channel] = chunk;
+#ifdef VITA
+	if (channel < ONS_MIX_CHANNELS)
+		nativeEffectStarted[channel] = false; // see nativeReleaseFinishedEffect
+#endif
 
 	if (!chunk)
 		return -1;
@@ -820,6 +1005,12 @@ void ONScripter::stopDWAVE(int channel) {
 	Lock lock(&playSoundThreadedLock);
 	if (wave_sample[channel]) {
 		Mix_Pause(channel);
+#ifdef VITA
+		// A stopped ME/SE is never played again without a new dwaveload
+		// (see nativeEffectChannel): free its PCM now, not at the next load.
+		if (nativeEffectChannel(channel))
+			channel_preloaded[channel] = false;
+#endif
 		if (!channel_preloaded[channel]) {
 			//don't free preloaded channels
 			wave_sample[channel]       = nullptr;
@@ -838,6 +1029,10 @@ void ONScripter::stopAllDWAVE() {
 	for (int ch = 0; ch < ONS_MIX_CHANNELS; ch++) {
 		if (wave_sample[ch]) {
 			Mix_Pause(ch);
+#ifdef VITA
+			if (nativeEffectChannel(ch))
+				channel_preloaded[ch] = false; // as in stopDWAVE
+#endif
 			if (!channel_preloaded[ch]) {
 				wave_sample[ch] = nullptr;
 			}
@@ -1050,6 +1245,7 @@ bool ONScripter::nativeRunLoopPrefetch(const std::string &file) {
 #endif
 	const unsigned epoch = nativePrefetchEpoch;
 	uint64_t pcmBytes{0};
+	size_t peakBytes{0};
 	std::shared_ptr<Wrapped_Mix_Chunk> chunk;
 	// From here on allocations fail (nullptr / std::bad_alloc) instead of
 	// spilling into vitaGL's pools or reaching the fatal new-handler.
@@ -1068,13 +1264,15 @@ bool ONScripter::nativeRunLoopPrefetch(const std::string &file) {
 			fp.reset();
 			if (buffer)
 				pcmBytes = nativeOggPcmBytes(buffer.get(), length);
-			// SDL_mixer holds up to about twice the PCM while it assembles it.
+			// nativeDecodeOggChunk holds the PCM and a few small buffers;
+			// SDL_mixer, for a stream it leaves to it, up to twice the PCM.
 			if (pcmBytes && pcmBytes <= maxBytes &&
-			    nativePrefetchMemoryOk(2 * pcmBytes + length + 1024 * 1024, static_cast<size_t>(pcmBytes))) {
+			    nativePrefetchMemoryOk(pcmBytes + length + 1024 * 1024, static_cast<size_t>(pcmBytes)) &&
+			    nativeDecodeOggChunk(buffer.get(), length, decoded, peakBytes) == NativeOggDecode::Unsupported &&
+			    nativePrefetchMemoryOk(2 * pcmBytes + length + 1024 * 1024, static_cast<size_t>(pcmBytes)))
 				decoded = Mix_LoadWAV_RW(SDL_RWFromMem(buffer.get(), static_cast<int>(length)), 1);
-				if (decoded)
-					chunk = std::make_shared<Wrapped_Mix_Chunk>(decoded);
-			}
+			if (decoded)
+				chunk = std::make_shared<Wrapped_Mix_Chunk>(decoded);
 		} catch (const std::bad_alloc &) {
 			if (decoded && !chunk)
 				Mix_FreeChunk(decoded); // Out of memory: skip, as if never queued.
@@ -1105,9 +1303,10 @@ bool ONScripter::nativeRunLoopPrefetch(const std::string &file) {
 			entry.file.clear();
 	}
 #if defined(ONS_VITA_FILE_LOGGING)
-	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: %s after %u ms (%u KiB decoded)\n",
+	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: %s after %u ms (%u KiB decoded, peak +%u KiB)\n",
 	          static_cast<unsigned>(SDL_GetTicks()), file.c_str(), ready ? "decoded" : "dropped",
-	          static_cast<unsigned>(SDL_GetTicks() - decodeStart), static_cast<unsigned>(pcmBytes / 1024));
+	          static_cast<unsigned>(SDL_GetTicks() - decodeStart), static_cast<unsigned>(pcmBytes / 1024),
+	          static_cast<unsigned>(peakBytes / 1024));
 #endif
 	return true;
 }
@@ -1179,5 +1378,20 @@ void ONScripter::nativeConsumePrefetchedLoop(const char *file) {
 #if defined(ONS_VITA_FILE_LOGGING)
 	sendToLog(LogLevel::Warn, "Timing %u: prefetch %s: hit\n", static_cast<unsigned>(SDL_GetTicks()), file);
 #endif
+}
+
+// The channel-finished event (ONS_CHUNK_EVENT): an ME/SE dwaveplay played to
+// its end is freed, as non-preloaded chunks are (see nativeEffectChannel).
+// Mix_FreeChunk and Mix_PlayChannel report the end of the chunk they replace,
+// so the event can be an earlier chunk's: free only one that dwaveplay has
+// started since its dwaveload and that is no longer playing.
+void ONScripter::nativeReleaseFinishedEffect(uint32_t channel) {
+	if (channel >= ONS_MIX_CHANNELS || !nativeEffectChannel(channel))
+		return;
+	Lock lock(&playSoundThreadedLock);
+	if (wave_sample[channel] && channel_preloaded[channel] && nativeEffectStarted[channel] && !Mix_Playing(channel)) {
+		wave_sample[channel]       = nullptr;
+		channel_preloaded[channel] = false;
+	}
 }
 #endif

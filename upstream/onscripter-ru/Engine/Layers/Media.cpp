@@ -58,6 +58,17 @@ bool MediaLayer::stopPlayback(FinishMode mode) {
 				if (img)
 					gpu.freeImage(img);
 			frame_gpu[DefFrame] = frame_gpu[NewFrame] = mask_gpu = nullptr;
+#ifdef VITA
+			// The colour-conversion planes too (about 1.4 MB for 720p NV12):
+			// nothing else frees them, so the layer's destruction on
+			// definereset leaked them. The next video's first frame recreates
+			// them (ensurePlanesImgs).
+			for (auto &plane : planes_gpu) {
+				if (plane)
+					gpu.freeImage(plane);
+				plane = nullptr;
+			}
+#endif
 		}
 
 		return true;

@@ -176,12 +176,31 @@ static void track(GLuint name) {
     }
 }
 
+#ifdef ONS_VITA_GPU_CENSUS
+static unsigned census_gen_failures, census_reclaims;
+/* Diagnostic builds: live framebuffer objects (all are tracked, as vitaGL has
+ * at most FRAMEBUFFER_CAPACITY), failed generations, GXM target reclaims. */
+void ons_vita_fbo_census(unsigned *live, unsigned *gen_failures, unsigned *reclaims) {
+    unsigned count = 0;
+    for (size_t i = 0; i < FRAMEBUFFER_CAPACITY; ++i)
+        if (tracked[i].framebuffer) count++;
+    *live = count;
+    *gen_failures = census_gen_failures;
+    *reclaims = census_reclaims;
+}
+#endif
+
 void __real_glGenFramebuffers(GLsizei, GLuint *);
 void __wrap_glGenFramebuffers(GLsizei count, GLuint *names) {
     /* The pinned SDK leaves unallocated outputs untouched at its FBO limit. */
     if (names) for (GLsizei i = 0; i < count; ++i) names[i] = 0;
     __real_glGenFramebuffers(count, names);
     if (names) for (GLsizei i = 0; i < count; ++i) track(names[i]);
+#ifdef ONS_VITA_GPU_CENSUS
+    if (names) for (GLsizei i = 0; i < count; ++i)
+        if (!names[i] && census_gen_failures++ < 8)
+            fprintf(stderr, "Census: glGenFramebuffers returned no framebuffer object (vitaGL limit reached?)\n");
+#endif
 }
 
 void __real_glBindFramebuffer(GLenum, GLuint);
@@ -244,5 +263,8 @@ int ons_vita_reclaim_render_target(SceGxmRenderTarget **requested) {
     }
     fb->target = NULL; /* sceneReset recreates metadata on the next write. */
     tracked[victim].pending_write = 0;
+#ifdef ONS_VITA_GPU_CENSUS
+    census_reclaims++;
+#endif
     return 1;
 }

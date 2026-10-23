@@ -1687,6 +1687,29 @@ static void *vitaTextureStorage(GPU_Image *image) {
 	return storage;
 }
 
+bool GPUController::hasTextureStorage(GPU_Image *image) {
+	return vitaTextureStorage(image) != nullptr;
+}
+
+#if defined(ONS_VITA_FILE_LOGGING)
+void *GPUController::textureStorage(GPU_Image *image) {
+	return vitaTextureStorage(image);
+}
+
+void GPUController::logPoolCensus() {
+	size_t held, heldBytes, pooled, pooledBytes;
+	globalImagePool.census(held, heldBytes, pooled, pooledBytes);
+	size_t typed = 0;
+	for (auto &entry : typedImagePools) typed += entry.second.count();
+	sendToLog(LogLevel::Warn,
+	          "Census pools: scheduled-load images %u (%u KiB), reuse pool %u (%u KiB), canvas %u, script %u, typed %u in %u pools\n",
+	          static_cast<unsigned>(held), static_cast<unsigned>(heldBytes / 1024), static_cast<unsigned>(pooled),
+	          static_cast<unsigned>(pooledBytes / 1024), static_cast<unsigned>(canvasImagePool.count()),
+	          static_cast<unsigned>(scriptImagePool.count()), static_cast<unsigned>(typed),
+	          static_cast<unsigned>(typedImagePools.size()));
+}
+#endif
+
 void GPUController::reclaimMemoryForTexture() {
 	ons.nativeReleasePrefetches(); // Also makes an in-flight prefetch drop its result.
 	{

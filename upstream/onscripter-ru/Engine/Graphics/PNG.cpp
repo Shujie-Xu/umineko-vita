@@ -201,8 +201,11 @@ SDL_Surface *PNGLoader::loadPng(SDL_RWops *src) {
 
 #ifdef VITA
 	// A lookahead prefetch reserves no texture: it may never be shown, and
-	// its upload makes one when it is.
-	if (!VitaMemory::softAllocations())
+	// its upload makes one when it is. Neither does an image without alpha:
+	// the reserved texture is RGBA, and the opaque ":c" backgrounds upload as
+	// RGB, leaving it unused (a full-screen 4 bpp texture per size) until
+	// moreram; one loaded with alpha after all just makes its own.
+	if (!VitaMemory::softAllocations() && num_channels != 3)
 #endif
 		gpu.scheduleLoadImage(width, height);
 

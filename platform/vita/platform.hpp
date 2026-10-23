@@ -7,6 +7,11 @@ bool initialize();
 const char *gameRoot();
 const char *dataRoot();
 const char *saveRoot();
-// Asset-preparation scale, bounded to [0.25, 1.0]; defaults to original size.
+// Asset-preparation scale of the release data: 0.5.
 float renderScale();
+#ifdef ONS_VITA_FILE_LOGGING
+// Diagnostic builds: one stderr line on where a thread runs (priority,
+// affinity, current and last CPU, migrations), to check CPU contention.
+void logThreadPlacement(const char *label, int threadId);
+#endif
 }

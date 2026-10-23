@@ -17,6 +17,7 @@
 #include <SDL2/SDL_gpu.h>
 
 #include <unordered_map>
+#include <functional>
 #include <string>
 #include <memory>
 #include <cassert>
@@ -94,7 +95,9 @@ public:
 	virtual void clear()                                         = 0;
 	virtual void remove(const KEY &keyname)                      = 0;
 	virtual std::shared_ptr<SETELEM> get(KEY keyname)            = 0;
-	virtual ~CachedSet()                                         = default;
+	// Diagnostics: every entry, in no particular order.
+	virtual void forEach(const std::function<void(const std::shared_ptr<SETELEM> &)> &visit) const = 0;
+	virtual ~CachedSet() = default;
 };
 
 template <typename SETELEM, typename KEY = std::string>
@@ -124,6 +127,9 @@ public:
 		elemCache.resize(0);        // evict all elements
 		elemCache.resize(capacity); // make it capable of holding the original capacity again
 		                            // (lru cache has no clear() method)
+	}
+	void forEach(const std::function<void(const std::shared_ptr<SETELEM> &)> &visit) const {
+		elemCache.forEach([&visit](const KEY &, const std::shared_ptr<SETELEM> &elem) { visit(elem); });
 	}
 	LRUCachedSet(int capacity)
 	    : capacity(capacity), elemCache(capacity) {}
@@ -155,6 +161,9 @@ public:
 	}
 	void clear() {
 		elemCache.clear();
+	}
+	void forEach(const std::function<void(const std::shared_ptr<SETELEM> &)> &visit) const {
+		for (const auto &entry : elemCache) visit(entry.second);
 	}
 	UnlimitedCachedSet() = default;
 };
@@ -219,6 +228,13 @@ public:
 	void removeAll(std::string filename) {
 		for (auto &number_set_pair : cacheSets) {
 			number_set_pair.second->remove(filename);
+		}
+	}
+	// Diagnostics: every entry of every set, with its set number.
+	void forEach(const std::function<void(int, const std::shared_ptr<SETELEM> &)> &visit) const {
+		for (auto &number_set_pair : cacheSets) {
+			const int number = number_set_pair.first;
+			number_set_pair.second->forEach([&](const std::shared_ptr<SETELEM> &elem) { visit(number, elem); });
 		}
 	}
 	virtual std::shared_ptr<SETELEM> get(const std::string &filename) {

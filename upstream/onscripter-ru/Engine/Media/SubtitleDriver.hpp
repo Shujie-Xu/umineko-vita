@@ -32,6 +32,9 @@ struct SubtitleImage {
 	int linesize;
 	int x, y;
 	uint32_t color;
+#ifdef __vita__
+	uint64_t hash{0}; // of buffer, which has a transparent last row and column (extractFrame)
+#endif
 };
 
 class SubtitleDriver {
@@ -56,7 +59,9 @@ public:
 	void blendBufInNeed(uint8_t *buffer, size_t width, int format, ASS_Image *img);
 	int extractFrame(std::vector<SubtitleImage> &images, uint64_t timestamp, ASS_Image **imgptr); /* Extracts all Ass_Image`s for this timestamp */
 #ifdef __vita__
-	bool renderNativeOverlay(std::vector<uint8_t> &pixels, SDL_Rect &bounds, int width, int height, uint64_t timestamp);
+	// force: report the overlay even if libass finds it unchanged since its
+	// previous render, for a consumer that starts over (a looped movie).
+	bool renderNativeOverlay(std::vector<uint8_t> &pixels, SDL_Rect &bounds, int width, int height, uint64_t timestamp, bool force = false);
 #endif
 private:
 	struct PendingPacket { std::vector<char> data; int64_t timestamp, duration; };

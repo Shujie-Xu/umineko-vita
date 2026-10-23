@@ -102,6 +102,23 @@ public:
 		SDL_AtomicUnlock(&access);
 	}
 	bool generate();
+#ifdef VITA
+	// Diagnostics: images made ahead for scheduled loads, and freed ones kept for reuse.
+	void census(size_t &held, size_t &heldBytes, size_t &pooled, size_t &pooledBytes) const {
+		auto bytes = [](const GPU_Image *img) {
+			return static_cast<size_t>(img->texture_w) * img->texture_h * img->bytes_per_pixel;
+		};
+		held = requested.size();
+		heldBytes = pooled = pooledBytes = 0;
+		for (auto *img : requested) heldBytes += bytes(img);
+		existent.forEach([&](const std::shared_ptr<Wrapped_GPU_Image> &wrapped) {
+			if (wrapped && wrapped->img) {
+				pooled++;
+				pooledBytes += bytes(wrapped->img);
+			}
+		});
+	}
+#endif
 
 private:
 	SDL_SpinLock access{0};
@@ -127,6 +144,7 @@ public:
 	void addImages(int n);         // pre-create some blank temporary images to avoid delays later
 	void clearUnused(bool require_empty = false);
 	bool empty() const { return pool.empty(); }
+	size_t count() const { return pool.size(); }
 };
 
 struct PooledGPUImage {
@@ -697,6 +715,15 @@ public:
 	// Drop the image/sound caches and pooled GPU images, then let vitaGL free
 	// everything queued for deferred release. For a texture that got no storage.
 	void reclaimMemoryForTexture();
+	// Whether vitaGL gave the texture storage (gpu_alloc_texture can fail silently).
+	static bool hasTextureStorage(GPU_Image *image);
+#if defined(ONS_VITA_FILE_LOGGING)
+	// Diagnostic builds: one log line on the image pools.
+	void logPoolCensus();
+	// Diagnostic builds: the texture's storage address; an upload that changes
+	// it made vitaGL copy the whole texture (copy-on-write).
+	static void *textureStorage(GPU_Image *image);
+#endif
 #endif
 
 	GPU_Image *getCanvasImage() { return canvasImagePool.getImage(); }

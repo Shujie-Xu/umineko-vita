@@ -80,22 +80,30 @@ void AsyncController::endThreads() {
 
 void AsyncController::queue(std::unique_ptr<AsyncInstruction> inst) {
 	AsyncInstructionQueue *instQueue = inst->getInstructionQueue();
+	SDL_Thread *exited{nullptr};
 	// Runs thread if it is not already running
 	SDL_AtomicLock(&instQueue->lock);
 	instQueue->q.push_back(std::move(inst));
 	if (!instQueue->quitOnEmpty)
 		SDL_SemPost(instQueue->instructionsWaiting);
 	if (!instQueue->thread) {
-		instQueue->thread = SDL_CreateThread(instQueue->threadLoopFunction,
-		                                     instQueue->name,
-		                                     instQueue->q.back()->ac);
-		// Nothing joins these threads (thread is only a "running" flag), and
-		// quit-on-empty queues start a new one each time they drain, so let
-		// each thread release its stack and handle when it exits.
-		if (instQueue->thread)
-			SDL_DetachThread(instQueue->thread);
+		// Quit-on-empty queues start a new thread each time they drain. The
+		// previous one cleared thread on leaving its loop; join it below so its
+		// stack is freed. Detaching does not do that on Vita (SDL deletes a
+		// thread only in SDL_WaitThread): with the lookahead prefetches every
+		// line started threads, each leaking a 64 KiB stack from the few MiB of
+		// system memory outside the heap and vitaGL's pools, until GXM could
+		// no longer allocate render targets (black backgrounds, white-edged
+		// mouths, missing menu text).
+		exited                   = instQueue->startedThread;
+		instQueue->thread        = SDL_CreateThread(instQueue->threadLoopFunction,
+		                                            instQueue->name,
+		                                            instQueue->q.back()->ac);
+		instQueue->startedThread = instQueue->thread;
 	}
 	SDL_AtomicUnlock(&instQueue->lock);
+	if (exited)
+		SDL_WaitThread(exited, nullptr);
 }
 
 // Main genericized async loop function

@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 namespace VitaSubtitles {
@@ -45,5 +46,20 @@ Bounds render(Image *images, int width, int height, std::vector<uint8_t> &pixels
         }
     }
     return result;
+}
+
+// Identifies a bitmap's content so a texture slot already holding it is not
+// uploaded again (a \fad step keeps every bitmap and changes only colours).
+inline uint64_t hash(const uint8_t *bytes, size_t size) {
+    uint64_t h = 0xcbf29ce484222325ull ^ size;
+    size_t i = 0;
+    for (; i + 4 <= size; i += 4) {
+        uint32_t word;
+        std::memcpy(&word, bytes + i, 4);
+        h = (h ^ word) * 0x100000001b3ull;
+    }
+    for (; i < size; ++i)
+        h = (h ^ bytes[i]) * 0x100000001b3ull;
+    return h ^ (h >> 29);
 }
 }
