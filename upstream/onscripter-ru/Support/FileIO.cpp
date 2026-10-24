@@ -1050,7 +1050,7 @@ void FileIO::setLogMode(FileIO::LogMode mode) {
 }
 
 void FileIO::log(LogLevel level, const char *fmt, va_list args) {
-#if defined(VITA) && !defined(ONS_VITA_RENDER_DIAGNOSTICS)
+#if defined(VITA) && !defined(ONS_VITA_RENDER_DIAGNOSTICS) && !defined(ONS_VITA_FILE_LOGGING)
 	if (level == LogLevel::Info)
 		return;
 #endif

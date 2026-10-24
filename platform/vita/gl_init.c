@@ -16,7 +16,14 @@
 
 GLboolean __wrap_vglInitExtended(int pool_size, int width, int height,
                                 int ram_threshold, SceGxmMultisampleMode msaa) {
-    return vglInitWithCustomThreshold(pool_size, width, height, ram_threshold,
+#ifdef ONS_VITA_FILE_LOGGING
+    fprintf(stderr, "vitaGL: initializing %dx%d, RAM threshold %d\n", width, height, ram_threshold);
+#endif
+    GLboolean initialized = vglInitWithCustomThreshold(pool_size, width, height, ram_threshold,
                                       0, ONS_AVPLAYER_PHYCONT_RESERVE,
                                       ONS_COMMON_DIALOG_RESERVE, msaa);
+#ifdef ONS_VITA_FILE_LOGGING
+    fprintf(stderr, "vitaGL: initialization returned %d\n", initialized);
+#endif
+    return initialized;
 }
