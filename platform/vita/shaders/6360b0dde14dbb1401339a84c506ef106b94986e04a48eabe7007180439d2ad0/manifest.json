@@ -1,8 +1,8 @@
 {
   "format": "ons-gxp-matrix-table-v1",
-  "abi": "d51e859878313d6141290fe3a6f8db58df458759cb50cebc3bf0ba445dfc7d2a",
-  "source": "Vita developer export from the native engine and bundled SDL_gpu shader corpus",
-  "sdk_vitagl_sha256": "fa7f030ef14d90fa427e81f63d996f2f3d74b763f717b4c046c7c7eefac32bf6",
+  "abi": "6360b0dde14dbb1401339a84c506ef106b94986e04a48eabe7007180439d2ad0",
+  "source": "Original upstream Vita exports, unchanged. Revalidated against the pinned legacy driver matrix-table format and complete GLES source corpus.",
+  "sdk_vitagl_sha256": "866d7d17a4097f99baf4ec1339ea06350a9bf9481e7923e32ff07126cc66c35b",
   "shaders": {
     "35632-03be7fb3178e7220.bin": {
       "source": "sdl-untextured_fragment",
@@ -96,5 +96,6 @@
       "source": "defaultVertex.vert",
       "sha256": "48691e5aa22dd178fa0b575de2f52bb31b810055271d6f418d8dcb2640d0421a"
     }
-  }
+  },
+  "vitagl_source": "Rinnegatamante/vitaGL@c2a950fbf554f5ec5bbb27c4d387a03f70b0eb6c"
 }

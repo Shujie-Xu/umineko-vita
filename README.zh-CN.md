@@ -1,6 +1,6 @@
 # 简体中文语言包准备
 
-本分支将日不落简体中文接到 Vita 项目已有的语言机制。中文脚本与资源使用现有语言插件布局，译文、配置、字体和通用底座资源保持原样。**已实现中文识别、语言切换及独立存档/缓存；完整 VPK 构建和中文真机验证尚未完成。**
+本分支将日不落简体中文接到 Vita 项目已有的语言机制。中文脚本与资源使用现有语言插件布局，译文、配置、字体和通用底座资源保持原样。**已实现中文识别、语言切换及独立存档/缓存，并补齐完整 VPK 构建；中文真机验证尚未完成。**
 
 ## 固定来源
 
@@ -70,7 +70,26 @@ python tools/prepare_cn_assets.py /path/to/updated-pc-game /path/to/umineko-cn-s
 
 日不落脚本通过 `language japanese` 使用 CJK 排版。菜单适配依据脚本是否定义歌曲字幕菜单判断布局，不再把 CJK 排版声明等同于日文菜单。适配只在内存中进行，保留原脚本字节长度、换行和标签位置；未改译文或脚本文件。
 
-## 验证与构建限制
+## 构建与真机测试
+
+需要 Python 3.11+、CMake 3.20+、Make、curl 和主机 C 编译器，支持 Apple Silicon macOS 与 x86_64 Linux。在仓库根目录执行：
+
+```sh
+python3 tools/build_vita.py
+```
+
+构建工具会校验固定官方 VitaSDK softfp 编译器和依赖包的 SHA-256，将 SDK、下载与依赖源码保存在已忽略的 `build/` 中。若设置了 `VITASDK`，则使用该目录并向其中安装固定依赖包。FFmpeg 6.0、libpng、SDL_mixer 和与现有适配代码匹配的 vitaGL 从固定源码构建；SDL_mixer 只应用上游原有的两处离线解码锁调整。上游资源编译器按原提交恢复，继续使用原生 CMake/SELF/VPK 打包流程。
+
+产物为 `native-build/umineko-native.vpk`，也可从 [VPK Actions 构建记录](https://github.com/Shujie-Xu/umineko-vita/actions/workflows/vita.yml)下载 `umineko-cn-vpk`。23 个 GXP 着色器保留上游原始二进制，针对可复现的旧版 vitaGL 重建依赖指纹；构建时检查完整 GLES 源码对应关系、文件 SHA-256、头部和 CRC，未启用真机动态着色器导出。
+
+1. 按[上游安装说明](https://github.com/stoicpingu/umineko-vita#setup-instructions-for-end-users)准备 Vita 底座和 Hotfix v2。
+2. 将中文增量包内 `umineko/` 的内容合并到 `ux0:data/umineko/`。
+3. 用 VitaShell 安装本分支 VPK，应用 ID 继续使用 `UMNK00001`，可覆盖原应用。
+4. 启动后在语言菜单选择 `ZH-CN` 并重启。只有中文插件且没有已保存语言偏好时会自动选中中文。
+
+真机首轮检查标题、开篇中文与语音、设置中语言切换，以及中文保存/读取后重启恢复。中文数据位于 `save/cn/`，其他语言仍使用各自原有目录。编译与打包通过不代表已经完成真机运行验证。
+
+## 主机回归验证
 
 主机回归测试编译生产代码中的语言识别、脚本列表、保存路径及菜单适配逻辑，配合实际 ONS2 脚本检查 16 种插件组合，并用 AddressSanitizer/UndefinedBehaviorSanitizer 检查内存访问。原有语言在未安装中文时，除恢复语言选择的初始化区外，其余菜单输出与 v1.4 逐字节比较。初始化区通过原有 `getscriptpath` 遍历脚本列表恢复选择，避免新增语言后超出原脚本固定行槽。
 
@@ -79,8 +98,6 @@ python tools/tests/test_native_languages.py /path/to/cn.file /path/to/en.file /p
 ```
 
 Actions 会先生成固定版本的中文脚本，再执行同一测试的中文用例。以上是主机代码检查，不代表已在 Vita 上运行。
-
-当前环境未配置 VitaSDK；此外，上游 `CMakeLists.txt` 引用了公开仓库未提交的 `tools/embed_resources.py` 和 `native-bench/vendor/libpng` 源码。补齐这些上游构建输入及相关工具链后，才能生成用于真机验收的 VPK。
 
 ## 本地生成脚本
 

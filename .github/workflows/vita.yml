@@ -1,0 +1,36 @@
+name: Build Vita VPK
+
+on:
+  push:
+    branches: [chinese-script]
+    paths:
+      - .github/workflows/vita.yml
+      - CMakeLists.txt
+      - tools/build_vita.py
+      - tools/embed_resources.py
+      - tools/native_shaders.py
+      - platform/**
+      - upstream/**
+      - vendor/**
+      - licenses/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vpk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build with pinned VitaSDK and native dependencies
+        run: python3 tools/build_vita.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: umineko-cn-vpk
+          path: native-build/umineko-native.vpk
+          if-no-files-found: error
+          retention-days: 90

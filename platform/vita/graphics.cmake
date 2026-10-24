@@ -16,20 +16,10 @@ add_library(ons_vita_sdl2 STATIC IMPORTED GLOBAL)
 set_target_properties(ons_vita_sdl2 PROPERTIES IMPORTED_LOCATION "${ONS_NATIVE_SDL2}")
 add_dependencies(ons_vita_sdl2 ons_vita_sdl2_archive)
 
-# ONScripter's bundled dependency patch avoids muting live playback while a
-# worker decodes the next compressed chunk. Adapt only the reviewed decoder
-# calls in a local SDK archive; leave all playback/channel locks intact.
-set(ONS_NATIVE_MIXER "${CMAKE_CURRENT_BINARY_DIR}/libons_sdl2_mixer.a")
-add_custom_command(OUTPUT "${ONS_NATIVE_MIXER}"
-  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/mixer_archive.py"
-    --ar "${CMAKE_AR}" "${VITASDK}/arm-vita-eabi/lib/libSDL2_mixer.a" "${ONS_NATIVE_MIXER}"
-  DEPENDS "${VITASDK}/arm-vita-eabi/lib/libSDL2_mixer.a" "${CMAKE_CURRENT_LIST_DIR}/mixer_archive.py"
-  COMMENT "Restoring ONScripter offline audio decoding without blocking playback"
-  VERBATIM)
-add_custom_target(ons_vita_mixer_archive DEPENDS "${ONS_NATIVE_MIXER}")
+# Built from source with ONScripter's two offline decoder locks removed.
 add_library(ons_vita_mixer STATIC IMPORTED GLOBAL)
-set_target_properties(ons_vita_mixer PROPERTIES IMPORTED_LOCATION "${ONS_NATIVE_MIXER}")
-add_dependencies(ons_vita_mixer ons_vita_mixer_archive)
+set_target_properties(ons_vita_mixer PROPERTIES
+  IMPORTED_LOCATION "${ONS_NATIVE_DEPS_ROOT}/lib/libSDL2_mixer.a")
 
 # Override only the proven faulty GLOBAL GLSL declaration pass. Keeping GLOBAL
 # mode preserves semantic assignments when shaders are compiled/relinked apart.
@@ -37,8 +27,8 @@ set(ONS_NATIVE_VITAGL "${CMAKE_CURRENT_BINARY_DIR}/libons_vitagl.a")
 add_custom_command(OUTPUT "${ONS_NATIVE_VITAGL}"
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_LIST_DIR}/gpu_translator_archive.py"
     --ar "${CMAKE_AR}" --objcopy "${CMAKE_OBJCOPY}"
-    "${VITASDK}/arm-vita-eabi/lib/libvitaGL.a" "${ONS_NATIVE_VITAGL}"
-  DEPENDS "${VITASDK}/arm-vita-eabi/lib/libvitaGL.a"
+    "${ONS_NATIVE_DEPS_ROOT}/lib/libvitaGL.a" "${ONS_NATIVE_VITAGL}"
+  DEPENDS "${ONS_NATIVE_DEPS_ROOT}/lib/libvitaGL.a"
     "${CMAKE_CURRENT_LIST_DIR}/gpu_translator_archive.py"
   COMMENT "Selecting corrected native vitaGL global shader translator"
   VERBATIM)
@@ -84,7 +74,7 @@ endif()
 set(ONS_SHADER_INPUTS ${ONS_RESOURCES}
   "${ONS_SDL_GPU_DIR}/include/SDL_gpu_GLES_2.h"
   "${CMAKE_CURRENT_LIST_DIR}/../../vendor/vitagl-translator/global.c"
-  "${VITASDK}/arm-vita-eabi/lib/libvitaGL.a")
+  "${ONS_NATIVE_DEPS_ROOT}/lib/libvitaGL.a")
 set(ONS_SHADER_FINGERPRINT "ons-gxp-matrix-table-v1")
 foreach(ONS_SHADER_INPUT IN LISTS ONS_SHADER_INPUTS)
   file(SHA256 "${ONS_SHADER_INPUT}" ONS_SHADER_INPUT_HASH)

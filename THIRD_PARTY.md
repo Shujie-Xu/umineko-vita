@@ -9,23 +9,31 @@ original licenses remain applicable. No game data is included.
 | FIOS initialization/cache adapter | Andy Nguyen, MIT; adapted from the local legacy port, notice in `licenses/FIOS.txt` |
 | SDL_gpu | `vendor/sdl-gpu/LICENSE.txt`, MIT; pin in `UPSTREAM.txt` |
 | SDL2, SDL_image, SDL_mixer | [libsdl-org](https://github.com/libsdl-org), zlib license; native VitaSDK archives, with local SDL2 viewport ABI and SDL_mixer offline-decoder lock adaptations in `platform/vita/` |
-| vitaGL | [Rinnegatamante/vitaGL](https://github.com/Rinnegatamante/vitaGL), LGPLv3; native VitaSDK archive with the local GLSL translator repair in `vendor/vitagl-translator/` |
+| vitaGL | [c2a950f source](https://github.com/Rinnegatamante/vitaGL/tree/c2a950fbf554f5ec5bbb27c4d387a03f70b0eb6c), LGPLv3; softfp source build matching the vendored translator references and framebuffer/matrix-table ABI, with the existing local GLOBAL translator in `vendor/vitagl-translator/` |
 | vitaShaRK | [Rinnegatamante/vitaShaRK](https://github.com/Rinnegatamante/vitaShaRK); native VitaSDK archive |
-| FFmpeg | [6.0 source](https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz), LGPL; reproducible configure/source hash in `extras/scripts/build_native_ffmpeg.sh` |
-| libpng | `native-bench/vendor/libpng/LICENSE`, locally compiled |
-| FreeType | [2.14.3 source](https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz), FreeType License; locally compiled (soft-float), notice in `native-bench/licenses/FreeType.txt` |
-| zlib | [1.3.2 source](https://github.com/madler/zlib/releases/tag/v1.3.2), zlib license; locally compiled (soft-float) |
+| FFmpeg | [6.0 source](https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz), LGPL; configure options and source hash in `tools/build_vita.py` |
+| libpng | 1.6.58, locally compiled with NEON disabled to retain the port's PNG/setjmp ABI; `licenses/libpng.txt` |
+| FreeType | [2.14.3 source](https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz), FreeType License; pinned VitaSDK softfp package, notice in `licenses/FreeType.txt` |
+| zlib | [1.3.2 source](https://github.com/madler/zlib/releases/tag/v1.3.2), zlib license; pinned VitaSDK softfp package |
 | HarfBuzz | [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz), MIT-style license |
 | FriBidi | [fribidi/fribidi](https://github.com/fribidi/fribidi), LGPL |
 | libass | [libass/libass](https://github.com/libass/libass), ISC |
 | LuaJIT | [LuaJIT/LuaJIT](https://github.com/LuaJIT/LuaJIT), MIT |
-| libogg, Vorbis, Opus | [Xiph.Org](https://xiph.org/), BSD-style licenses; Ogg notice in `native-bench/licenses/libogg.txt` |
-| bzip2 | `native-bench/licenses/bzip2.txt` |
+| libogg, Vorbis, Opus | [Xiph.Org](https://xiph.org/), BSD-style licenses; Ogg notice in `licenses/libogg.txt` |
+| bzip2 | `licenses/bzip2.txt` |
 | JPEG, WebP, mpg123, libmodplug, libxmp | Native VitaSDK dependencies; retain their upstream licenses when distributing |
 
 The historical MVP additionally links vita2d and Tremor; see
 `native-bench/THIRD_PARTY.txt`. The full engine does not load the old Android
 shared object or the former MIT SO loader.
+
+`tools/build_vita.py` pins and SHA-256 verifies the official VitaSDK softfp
+compiler snapshot `20260828.667.1`, package snapshot `20261015.54.1`, and the
+native source archives. SDL_mixer is rebuilt with the same two decoder locks
+removed as `Dependencies/patches/SDL2_mixer-no-locks.patch`; playback locks stay
+intact. The 23 upstream GXP programs are unchanged. Their directory fingerprint
+was renewed for the reproducible legacy vitaGL source build; the build checks
+every GLES source hash, binary SHA-256, header, CRC and matrix-table envelope.
 
 Japanese text geometry fixes are adapted from [AuroraWright’s ONScripter-RU fork](https://github.com/AuroraWright/onscripter-ru/tree/021bc2440e081bed5e12ace6516021bd423719bc), under the existing ONScripter-RU license. See `docs/NATIVE_JAPANESE.md` for scope and provenance.
 

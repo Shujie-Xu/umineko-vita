@@ -12,6 +12,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(ONS_UPSTREAM "${CMAKE_CURRENT_SOURCE_DIR}/upstream/onscripter-ru")
+set(ONS_NATIVE_DEPS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/build/native-deps/install" CACHE PATH
+    "Dependencies prepared by tools/build_vita.py")
+include_directories(BEFORE "${ONS_NATIVE_DEPS_ROOT}/include")
 set(VITA_TITLEID "UMNK00001" CACHE STRING "Umineko release application ID")
 set(VITA_VERSION "01.40" CACHE STRING "Umineko release version (v1.4)")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")
@@ -34,13 +37,10 @@ add_custom_command(OUTPUT "${ONS_RESOURCE_SOURCE}"
     --tool "${ONS_EMBED}" --source "${ONS_UPSTREAM}" --output "${ONS_RESOURCE_SOURCE}"
   DEPENDS "${ONS_EMBED}" ${ONS_RESOURCES} tools/embed_resources.py VERBATIM)
 
-# The MVP's local PNG build matches FreeType's setjmp ABI, unlike the
-# preinstalled SDK PNG archive. Both native applications use this same source.
-file(GLOB ONS_PNG_SOURCES CONFIGURE_DEPENDS native-bench/vendor/libpng/png*.c)
-add_library(ons_native_png STATIC ${ONS_PNG_SOURCES})
-target_include_directories(ons_native_png PUBLIC native-bench/vendor/libpng)
-target_compile_definitions(ons_native_png PRIVATE PNG_ARM_NEON_OPT=0)
-target_link_libraries(ons_native_png PUBLIC z)
+add_library(ons_native_png STATIC IMPORTED)
+set_target_properties(ons_native_png PROPERTIES
+  IMPORTED_LOCATION "${ONS_NATIVE_DEPS_ROOT}/lib/libpng.a"
+  INTERFACE_LINK_LIBRARIES z)
 include(platform/vita/graphics.cmake)
 file(GLOB_RECURSE ONS_ENGINE_SOURCES CONFIGURE_DEPENDS "${ONS_UPSTREAM}/Engine/*.cpp")
 list(FILTER ONS_ENGINE_SOURCES EXCLUDE REGEX "/\\._")
@@ -94,7 +94,7 @@ target_link_libraries(onscripter_vita PRIVATE -Wl,--start-group ons_vita_gpu ons
   SDL2_image ons_vita_mixer ons_vita_sdl2 freetype harfbuzz bz2 ass fribidi
   ${ONS_VITA_MEDIA_LIBRARIES}
   vorbisfile vorbis ogg opusfile opus mpg123 modplug xmp-lite
-  luajit-5.1 dl jpeg webp sharpyuv z m pthread
+  luajit-5.1 dl jpeg webp webpdemux sharpyuv z m pthread
   ons_vita_gl vitashark SceShaccCgExt taihen_stub SceShaccCg_stub mathneon
   ScePower_stub SceCtrl_stub SceGxm_stub SceDisplay_stub SceAppMgr_stub SceAppUtil_stub
   SceAudio_stub SceAudioIn_stub SceSysmodule_stub SceIofilemgr_stub SceCommonDialog_stub
@@ -121,10 +121,10 @@ vita_create_vpk(umineko-native.vpk ${VITA_TITLEID} eboot.bin
        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/sdl-gpu/LICENSE.txt" licenses/SDL_gpu.txt
        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/vitagl-translator/COPYING.LESSER" licenses/vitaGL-LGPL-3.0.txt
        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/vitagl-translator/COPYING" licenses/vitaGL-GPL-3.0.txt
-       "${CMAKE_CURRENT_SOURCE_DIR}/native-bench/vendor/libpng/LICENSE" licenses/libpng.txt
-       "${CMAKE_CURRENT_SOURCE_DIR}/native-bench/licenses/FreeType.txt" licenses/FreeType.txt
-       "${CMAKE_CURRENT_SOURCE_DIR}/native-bench/licenses/libogg.txt" licenses/libogg.txt
-       "${CMAKE_CURRENT_SOURCE_DIR}/native-bench/licenses/bzip2.txt" licenses/bzip2.txt
+       "${CMAKE_CURRENT_SOURCE_DIR}/licenses/libpng.txt" licenses/libpng.txt
+       "${CMAKE_CURRENT_SOURCE_DIR}/licenses/FreeType.txt" licenses/FreeType.txt
+       "${CMAKE_CURRENT_SOURCE_DIR}/licenses/libogg.txt" licenses/libogg.txt
+       "${CMAKE_CURRENT_SOURCE_DIR}/licenses/bzip2.txt" licenses/bzip2.txt
        "${CMAKE_CURRENT_SOURCE_DIR}/extras/livearea/icon0.png" sce_sys/icon0.png
        "${CMAKE_CURRENT_SOURCE_DIR}/extras/livearea/startup.png" sce_sys/livearea/contents/startup.png
        "${CMAKE_CURRENT_SOURCE_DIR}/extras/livearea/bg0.png" sce_sys/livearea/contents/bg0.png

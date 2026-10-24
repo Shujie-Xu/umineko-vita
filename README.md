@@ -109,20 +109,27 @@ Additional engine behavior can be customized by editing `ux0:data/umineko/ons.cf
 
 ### Prerequisites
 
-- A [vitasdk](https://github.com/vitasdk) toolchain with the soft-float (`softfp`) packages the engine links: SDL2, SDL2_image, SDL2_mixer, [vitaGL](https://github.com/Rinnegatamante/vitaGL), [vitaShaRK](https://github.com/Rinnegatamante/vitaShaRK), HarfBuzz, FriBidi, libass, LuaJIT and the audio/image codecs listed in [THIRD_PARTY.md](THIRD_PARTY.md).
-- FFmpeg 6.0 static libraries built for the Vita in `build/native-media-deps/install` (or pass `-DONS_FFMPEG_ROOT=<prefix>`).
-- If your vitasdk ships hard-float `libz.a` / `libfreetype.a`, build soft-float zlib 1.3.2 and FreeType 2.14.3 (`-mfloat-abi=softfp`) and put them first on the linker path, e.g. `-DCMAKE_EXE_LINKER_FLAGS="-Wl,-z,nocopyreloc -L<prefix>/lib"`.
+- Python 3.11+, CMake 3.20+, Make, curl and a host C compiler.
+- Apple Silicon macOS or x86_64 Linux. The build helper downloads a fixed official [VitaSDK](https://github.com/vitasdk) softfp compiler and package snapshot, verifies every archive's SHA-256, and builds the native dependencies listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ### Building the eboot & VPK
 
 ```bash
-cmake -S . -B native-build -G Ninja \
-  -DCMAKE_TOOLCHAIN_FILE=$VITASDK/share/vita.toolchain.cmake \
-  -DCMAKE_BUILD_TYPE=Release
-cmake --build native-build
+python3 tools/build_vita.py
 ```
 
-This generates `native-build/eboot.bin` and `native-build/umineko-native.vpk`. Add `-DONS_VITA_FILE_LOGGING=ON` for a diagnostic build that writes `ux0:data/umineko-native/err.txt`.
+This generates `native-build/eboot.bin` and `native-build/umineko-native.vpk`.
+
+Downloads, the SDK and native dependency sources stay in the ignored `build/`
+directory. An explicit `VITASDK` selects another SDK prefix; the helper installs
+its pinned softfp packages there. The source build restores the upstream
+resource compiler and offline decoder lock change without the unpublished
+`native-bench` tree. The existing GXP programs are checked against every GLES
+resource and the pinned legacy vitaGL archive; shader compilation/export is
+not needed on the console. To change CMake options after preparation, run
+`cmake -S . -B native-build -DONS_VITA_FILE_LOGGING=ON`, then
+`cmake --build native-build`. Diagnostic builds write
+`ux0:data/umineko-native/err.txt`.
 
 ---
 

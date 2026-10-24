@@ -1,12 +1,12 @@
 # Include after creating the native engine target. The stock VitaSDK FFmpeg
 # omits MPEG-2 video, MPEGvideo demuxing and H.264; it cannot run the game's
 # masked .m2v movies or serve as a fallback for hardware-incompatible MP4s.
-set(ONS_FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/build/native-media-deps/install" CACHE PATH
-    "Native FFmpeg prefix produced by extras/scripts/build_native_ffmpeg.sh")
+set(ONS_FFMPEG_ROOT "${ONS_NATIVE_DEPS_ROOT}" CACHE PATH
+    "Native FFmpeg prefix produced by tools/build_vita.py")
 function(ons_vita_add_media target)
   foreach(component avformat avcodec swresample swscale avutil)
     if(NOT EXISTS "${ONS_FFMPEG_ROOT}/lib/lib${component}.a")
-      message(FATAL_ERROR "Native FFmpeg dependency missing: run extras/scripts/build_native_ffmpeg.sh (or set ONS_FFMPEG_ROOT)")
+      message(FATAL_ERROR "Native FFmpeg dependency missing: run tools/build_vita.py (or set ONS_FFMPEG_ROOT)")
     endif()
     list(APPEND media_libraries "${ONS_FFMPEG_ROOT}/lib/lib${component}.a")
   endforeach()
