@@ -1,6 +1,6 @@
 # 简体中文语言包准备
 
-本分支准备日不落简体中文脚本与独立语言资源。采用 Vita 项目现有语言插件的目录布局和 0.5 图片缩放方式，保留原译文、配置与字体。引擎、其他语言、通用底座资源均未改动。**中文语言注册和真机验证留待第三步。**
+本分支将日不落简体中文接到 Vita 项目已有的语言机制。中文脚本与资源使用现有语言插件布局，译文、配置、字体和通用底座资源保持原样。**已实现中文识别、语言切换及独立存档/缓存；完整 VPK 构建和中文真机验证尚未完成。**
 
 ## 固定来源
 
@@ -48,9 +48,39 @@ umineko/
 python tools/prepare_cn_assets.py /path/to/updated-pc-game /path/to/umineko-cn-script build/cn-addon
 ```
 
-工具只读取 PC 原料和第一步的脚本包，在新的输出目录中生成增量文件、来源说明、脚本许可证和 `SHA256SUMS`；字体保持逐字节不变。输出内的 `umineko/` 对应 `ux0:data/umineko/`。本阶段只准备数据，待中文语言接入后再启用。
+工具只读取 PC 原料和第一步的脚本包，在新的输出目录中生成增量文件、来源说明、脚本许可证和 `SHA256SUMS`；字体保持逐字节不变。输出内的 `umineko/` 对应 `ux0:data/umineko/`。启用中文需要包含本分支语言接入改动的引擎；上游 v1.4 VPK 不会自动识别中文。
 
 游戏素材沿用原权利人的权利；脚本的 BSD 许可证不扩展到图片或字体。仓库只保存准备工具和说明，生成包与 PC 原料放在仓库外或已忽略的 `build/` 内。
+
+## 语言切换、存档与缓存
+
+中文完整性检查沿用日文插件的方式：`cn.file` 是有效脚本，`cn.cfg` 存在，且 `language_cn/fonts_cn/default.ttf` 存在。只有一个语言插件、且没有原生偏好中保存的语言选择时，自动选中该插件；多个插件时沿用英文默认值。已保存的选择优先。
+
+设置菜单中的顺序为 `English / JP / PT-BR / Español / ZH-CN`，只列出已安装的语言。选择语言后重启应用生效，与现有语言一致。`ZH-CN` 使用 ASCII 标签，可在英文和其他语言的字体下正常显示。
+
+| 语言 | 存档与缓存根目录 |
+| --- | --- |
+| 英文 | `ux0:data/umineko/save/` |
+| 日文 | `ux0:data/umineko/save/jp/` |
+| 葡语 | `ux0:data/umineko/save/pt/` |
+| 西语 | `ux0:data/umineko/save/es/` |
+| 简体中文 | `ux0:data/umineko/save/cn/` |
+
+中文的已读记录、进度与渲染缓存走同一个原有保存路径机制，其中缓存位于 `save/cn/caches/`。不迁移或混用其他语言的存档。
+
+日不落脚本通过 `language japanese` 使用 CJK 排版。菜单适配依据脚本是否定义歌曲字幕菜单判断布局，不再把 CJK 排版声明等同于日文菜单。适配只在内存中进行，保留原脚本字节长度、换行和标签位置；未改译文或脚本文件。
+
+## 验证与构建限制
+
+主机回归测试编译生产代码中的语言识别、脚本列表、保存路径及菜单适配逻辑，配合实际 ONS2 脚本检查 16 种插件组合，并用 AddressSanitizer/UndefinedBehaviorSanitizer 检查内存访问。原有语言在未安装中文时，除恢复语言选择的初始化区外，其余菜单输出与 v1.4 逐字节比较。初始化区通过原有 `getscriptpath` 遍历脚本列表恢复选择，避免新增语言后超出原脚本固定行槽。
+
+```sh
+python tools/tests/test_native_languages.py /path/to/cn.file /path/to/en.file /path/to/jp.file /path/to/pt.file /path/to/es.file
+```
+
+Actions 会先生成固定版本的中文脚本，再执行同一测试的中文用例。以上是主机代码检查，不代表已在 Vita 上运行。
+
+当前环境未配置 VitaSDK；此外，上游 `CMakeLists.txt` 引用了公开仓库未提交的 `tools/embed_resources.py` 和 `native-bench/vendor/libpng` 源码。补齐这些上游构建输入及相关工具链后，才能生成用于真机验收的 VPK。
 
 ## 本地生成脚本
 

@@ -3,7 +3,13 @@ name: Prepare simplified Chinese script
 on:
   push:
     branches: [chinese-script]
-    paths: ['.github/workflows/chinese-script.yml']
+    paths:
+      - .github/workflows/chinese-script.yml
+      - platform/vita/settings_script.hpp
+      - tools/tests/test_native_languages.py
+      - upstream/onscripter-ru/Engine/Core/Loader.cpp
+      - upstream/onscripter-ru/Engine/Core/ONScripter.cpp
+      - upstream/onscripter-ru/Engine/Handlers/Script.cpp
   workflow_dispatch:
 
 permissions:
@@ -19,6 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Check out the fixed SNS Team source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -89,6 +96,8 @@ jobs:
           JS
           cd build/cn-script
           sha256sum cn.txt cn.file cn.cfg LICENSE.txt SOURCE.txt > SHA256SUMS
+      - name: Test native language selection, saves and menu offsets
+        run: python3 tools/tests/test_native_languages.py build/cn-script/cn.file
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: umineko-cn-script
