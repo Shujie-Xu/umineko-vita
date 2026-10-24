@@ -14,7 +14,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(ONS_UPSTREAM "${CMAKE_CURRENT_SOURCE_DIR}/upstream/onscripter-ru")
 set(ONS_NATIVE_DEPS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/build/native-deps/install" CACHE PATH
     "Dependencies prepared by tools/build_vita.py")
-include_directories(BEFORE "${ONS_NATIVE_DEPS_ROOT}/include")
+include_directories(BEFORE "${ONS_NATIVE_DEPS_ROOT}/include" "${ONS_NATIVE_DEPS_ROOT}/include/SDL2")
 set(VITA_TITLEID "UMNK00001" CACHE STRING "Umineko release application ID")
 set(VITA_VERSION "01.40" CACHE STRING "Umineko release version (v1.4)")
 set(VITA_MKSFOEX_FLAGS "-d ATTRIBUTE2=12")

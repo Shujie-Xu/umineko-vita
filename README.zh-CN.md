@@ -78,7 +78,7 @@ python tools/prepare_cn_assets.py /path/to/updated-pc-game /path/to/umineko-cn-s
 python3 tools/build_vita.py
 ```
 
-构建工具会校验固定官方 VitaSDK softfp 编译器和依赖包的 SHA-256，将 SDK、下载与依赖源码保存在已忽略的 `build/` 中。若设置了 `VITASDK`，则使用该目录并向其中安装固定依赖包。FFmpeg 6.0、libpng、SDL_mixer 和与现有适配代码匹配的 vitaGL 从固定源码构建；SDL_mixer 只应用上游原有的两处离线解码锁调整。上游资源编译器按原提交恢复，继续使用原生 CMake/SELF/VPK 打包流程。
+构建工具会校验固定官方 VitaSDK softfp 编译器和依赖包的 SHA-256，将 SDK、下载与依赖源码保存在已忽略的 `build/` 中。若设置了 `VITASDK`，则使用该目录并向其中安装固定依赖包。SDL2 使用 Northfear 的 vitaGL 分支并启用 `VIDEO_VITA_VGL`，构建时检查图形上下文和交换缓冲所需符号；普通 SDK 的 SDL2 未包含该后端，不能用于本项目。FFmpeg 6.0、libpng、SDL_mixer 和与现有适配代码匹配的 vitaGL 从固定源码构建；SDL_mixer 只应用上游原有的两处离线解码锁调整。上游资源编译器按原提交恢复，继续使用原生 CMake/SELF/VPK 打包流程。
 
 产物为 `native-build/umineko-native.vpk`，也可从 [VPK Actions 构建记录](https://github.com/Shujie-Xu/umineko-vita/actions/workflows/vita.yml)下载 `umineko-cn-vpk`。23 个 GXP 着色器保留上游原始二进制，针对可复现的旧版 vitaGL 重建依赖指纹；构建时检查完整 GLES 源码对应关系、文件 SHA-256、头部和 CRC，未启用真机动态着色器导出。
 

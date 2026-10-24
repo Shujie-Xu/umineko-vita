@@ -126,7 +126,9 @@ its pinned softfp packages there. The source build restores the upstream
 resource compiler and offline decoder lock change without the unpublished
 `native-bench` tree. The existing GXP programs are checked against every GLES
 resource and the pinned legacy vitaGL archive; shader compilation/export is
-not needed on the console. To change CMake options after preparation, run
+not needed on the console. SDL2 uses the pinned Northfear vitaGL fork with
+`VIDEO_VITA_VGL=ON`; context creation and buffer swap symbols are checked as
+part of the build. To change CMake options after preparation, run
 `cmake -S . -B native-build -DONS_VITA_FILE_LOGGING=ON`, then
 `cmake --build native-build`. Diagnostic builds write
 `ux0:data/umineko-native/err.txt`.

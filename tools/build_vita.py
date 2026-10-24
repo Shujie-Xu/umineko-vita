@@ -20,7 +20,6 @@ SDK_HASHES = {
     ("Linux", "x86_64"): ("x86_64-linux-gnu", "d6ccefa998607d5ad1599bfb07e97f19be18c14cad7dca71441861aa1a6d0107"),
 }
 PACKAGE_HASHES = {
-    'sdl2-2.32.8-1-vita_softfp.pkg.tar.xz': '0a1434d259b9ad9c9343f18a5a4d24211fc59d9fce3b14d60950e63ecd8e226e',
     'sdl2_image-2.8.12-1-vita_softfp.pkg.tar.xz': '06fc17731c3c3f5034d37e92847af45e428b4579d534303726bbb5ef1f50d890',
     'freetype-2.14.3-1-vita_softfp.pkg.tar.xz': 'fd6be5953848eb72b99350e83d19bfa77f0d88dbedaef51e4fc6437fbd44418c',
     'harfbuzz-14.5.0-1-vita_softfp.pkg.tar.xz': '7eaf4d9d9dc2537cd808a628862e8ce6952c8ec5571f72ba2c314fae43421330',
@@ -46,6 +45,7 @@ PACKAGE_HASHES = {
     'flac-1.3.4-1-vita_softfp.pkg.tar.xz': 'b8f548569faff32d3fd6ed6b4f9e32736a0fbd2a15c8b1d6e1520dddfdd65beb',
 }
 VITAGL = "c2a950fbf554f5ec5bbb27c4d387a03f70b0eb6c"
+SDL2_VITAGL = "f99bb638f7eb256fa812e9da15d4e295a170640c"
 
 
 def run(*command, cwd=ROOT):
@@ -132,6 +132,20 @@ run("arm-vita-eabi-objcopy", "--enable-deterministic-archives", "--strip-debug",
     driver / "libvitaGL.a", prefix / "lib/libvitaGL.a")
 shutil.copy2(driver / "source/vitaGL.h", prefix / "include/vitaGL.h")
 
+sdl = source(f"https://github.com/Northfear/SDL/archive/{SDL2_VITAGL}.tar.gz",
+             "e0392c4f7d0b8aa06f0182564d624ab980e171a8fcba532a37874405b9c5f977")
+cmake_build(sdl, "sdl-build", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+            "-DSDL_SHARED=OFF", "-DSDL_STATIC=ON", "-DSDL_TEST=OFF",
+            "-DVIDEO_VITA_VGL=ON", "-DVIDEO_VITA_PIB=OFF", "-DVIDEO_VITA_PVR=OFF",
+            "-DCMAKE_POSITION_INDEPENDENT_CODE=OFF",
+            f"-DCMAKE_C_FLAGS=-mfloat-abi=softfp -I{prefix}/include -Wno-error=implicit-function-declaration -Wno-error=int-conversion -Wno-error=incompatible-pointer-types")
+symbols = subprocess.check_output(["arm-vita-eabi-nm", "-g", str(prefix / "lib/libSDL2.a")],
+                                  text=True, stderr=subprocess.DEVNULL)
+for binding, symbol in (("T", "VITA_GLES_CreateContext"), ("T", "VITA_GLES_SwapWindow"),
+                        ("U", "vglInitExtended")):
+    if f" {binding} {symbol}\n" not in symbols:
+        raise ValueError(f"SDL2 is missing the required vitaGL backend: {symbol}")
+
 mixer = source("https://github.com/libsdl-org/SDL_mixer/releases/download/release-2.8.2/SDL2_mixer-2.8.2.tar.gz",
                "938dff531d00ace2296557a6599abe6f34599e2f34f0a4a08a397e2ccac8b8f7")
 path = mixer / "src/mixer.c"
@@ -151,6 +165,7 @@ cmake_build(mixer, "mixer-build", "-DBUILD_SHARED_LIBS=OFF", "-DCMAKE_POSITION_I
             "-DSDL2MIXER_DEPS_SHARED=OFF", "-DSDL2MIXER_SAMPLES=OFF", "-DSDL2MIXER_CMD=OFF",
             "-DSDL2MIXER_MIDI=OFF", "-DSDL2MIXER_FLAC=OFF", "-DSDL2MIXER_WAVPACK=OFF",
             "-DSDL2MIXER_MOD_XMP=ON", "-DSDL2MIXER_MOD_XMP_LITE=ON", "-DSDL2MIXER_VORBIS=VORBISFILE",
+            f"-DSDL2_DIR={prefix}/lib/cmake/SDL2",
             "-DCMAKE_C_FLAGS=-mfloat-abi=softfp -Wno-error=incompatible-pointer-types")
 png = source("https://downloads.sourceforge.net/libpng/libpng-1.6.58.tar.xz",
              "28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775")

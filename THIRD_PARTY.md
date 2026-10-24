@@ -8,7 +8,8 @@ original licenses remain applicable. No game data is included.
 | ONScripter-RU | `upstream/onscripter-ru/LICENSE`, `LICENSE-GPLv2`, `LICENSE-BSD`; source pinned in `upstream/source-manifest.json` |
 | FIOS initialization/cache adapter | Andy Nguyen, MIT; adapted from the local legacy port, notice in `licenses/FIOS.txt` |
 | SDL_gpu | `vendor/sdl-gpu/LICENSE.txt`, MIT; pin in `UPSTREAM.txt` |
-| SDL2, SDL_image, SDL_mixer | [libsdl-org](https://github.com/libsdl-org), zlib license; native VitaSDK archives, with local SDL2 viewport ABI and SDL_mixer offline-decoder lock adaptations in `platform/vita/` |
+| SDL2 | [Northfear/SDL vitaGL fork](https://github.com/Northfear/SDL/tree/f99bb638f7eb256fa812e9da15d4e295a170640c), zlib license; built with `VIDEO_VITA_VGL=ON` and softfp. The SDK's standard SDL2 has no vitaGL backend. The existing local viewport ABI adaptation remains in `platform/vita/` |
+| SDL_image, SDL_mixer | [libsdl-org](https://github.com/libsdl-org), zlib license; SDL_image uses the pinned VitaSDK package; SDL_mixer is rebuilt with the upstream offline-decoder lock change |
 | vitaGL | [c2a950f source](https://github.com/Rinnegatamante/vitaGL/tree/c2a950fbf554f5ec5bbb27c4d387a03f70b0eb6c), LGPLv3; softfp source build matching the vendored translator references and framebuffer/matrix-table ABI, with the existing local GLOBAL translator in `vendor/vitagl-translator/` |
 | vitaShaRK | [Rinnegatamante/vitaShaRK](https://github.com/Rinnegatamante/vitaShaRK); native VitaSDK archive |
 | FFmpeg | [6.0 source](https://ffmpeg.org/releases/ffmpeg-6.0.tar.xz), LGPL; configure options and source hash in `tools/build_vita.py` |
@@ -29,7 +30,9 @@ shared object or the former MIT SO loader.
 
 `tools/build_vita.py` pins and SHA-256 verifies the official VitaSDK softfp
 compiler snapshot `20260828.667.1`, package snapshot `20261015.54.1`, and the
-native source archives. SDL_mixer is rebuilt with the same two decoder locks
+native source archives. SDL2 is built from the vitaGL fork and its context,
+swap and vitaGL initialization symbols are checked before packaging.
+SDL_mixer is rebuilt with the same two decoder locks
 removed as `Dependencies/patches/SDL2_mixer-no-locks.patch`; playback locks stay
 intact. The 23 upstream GXP programs are unchanged. Their directory fingerprint
 was renewed for the reproducible legacy vitaGL source build; the build checks

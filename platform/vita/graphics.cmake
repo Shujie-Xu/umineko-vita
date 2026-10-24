@@ -7,8 +7,8 @@ set(ONS_NATIVE_SDL2 "${CMAKE_CURRENT_BINARY_DIR}/libons_sdl2_vita.a")
 add_custom_command(OUTPUT "${ONS_NATIVE_SDL2}"
   COMMAND "${CMAKE_OBJCOPY}"
     --redefine-sym sceGxmSetViewport=sceGxmSetViewport_sfp
-    "${VITASDK}/arm-vita-eabi/lib/libSDL2.a" "${ONS_NATIVE_SDL2}"
-  DEPENDS "${VITASDK}/arm-vita-eabi/lib/libSDL2.a"
+    "${ONS_NATIVE_DEPS_ROOT}/lib/libSDL2.a" "${ONS_NATIVE_SDL2}"
+  DEPENDS "${ONS_NATIVE_DEPS_ROOT}/lib/libSDL2.a"
   COMMENT "Adapting SDL2 native GXM viewport ABI without modifying the SDK"
   VERBATIM)
 add_custom_target(ons_vita_sdl2_archive DEPENDS "${ONS_NATIVE_SDL2}")
