@@ -73,7 +73,7 @@ jobs:
           const tableText = engine.match(/CompressedConversionTable\[256\]\{([\s\S]*?)\};/)[1];
           const table = tableText.match(/0x[0-9a-f]+/gi).map(n => Number(n));
           assert.equal(table.length, 256);
-          const headerValue = name => Number(engine.match(new RegExp(`${name}\\{(0x[0-9a-f]+|[0-9]+)\\}`))[1]);
+          const headerValue = name => Number(engine.match(new RegExp(`${name}\\{(0x[0-9a-f]+|[0-9]+)\\}`, 'i'))[1]);
           const crc = name => engine.match(new RegExp(`${name}\\[2\\]\\{([^}]+)\\}`))[1].split(',').map(n => Number(n.trim()));
           const transform = (bytes, [a, b]) => bytes.map(value => table[value ^ a] ^ b);
           const file = readFileSync('build/cn-script/cn.file');
