@@ -65,6 +65,7 @@ tools/
 !/tools/tests/
 /tools/tests/*
 !/tools/tests/test_native_video_threads.py
+!/tools/prepare_cn_assets.py
 vendor/vitagl-translator/tests/
 vendor/sdl-gpu/tests/
 vendor/sdl-gpu/demos/
