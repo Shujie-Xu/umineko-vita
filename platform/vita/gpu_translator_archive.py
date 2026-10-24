@@ -11,7 +11,7 @@ parser.add_argument("--objcopy", required=True)
 parser.add_argument("source", type=Path)
 parser.add_argument("output", type=Path)
 args = parser.parse_args()
-if hashlib.sha256(args.source.read_bytes()).hexdigest() != "866d7d17a4097f99baf4ec1339ea06350a9bf9481e7923e32ff07126cc66c35b":
+if hashlib.sha256(args.source.read_bytes()).hexdigest() != "dff979edde7e1f56419c096a0cc439136e8d2daaea3224e7c37bf05100162bdc":
     raise ValueError("vitaGL archive differs from the pinned legacy softfp build; run tools/build_vita.py")
 subprocess.run([
     args.objcopy, "--enable-deterministic-archives", "--weaken-symbol=glsl_translate_with_global",

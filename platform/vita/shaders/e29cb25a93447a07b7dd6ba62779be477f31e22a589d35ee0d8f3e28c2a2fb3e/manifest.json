@@ -1,8 +1,8 @@
 {
   "format": "ons-gxp-matrix-table-v1",
-  "abi": "6360b0dde14dbb1401339a84c506ef106b94986e04a48eabe7007180439d2ad0",
+  "abi": "e29cb25a93447a07b7dd6ba62779be477f31e22a589d35ee0d8f3e28c2a2fb3e",
   "source": "Original upstream Vita exports, unchanged. Revalidated against the pinned legacy driver matrix-table format and complete GLES source corpus.",
-  "sdk_vitagl_sha256": "866d7d17a4097f99baf4ec1339ea06350a9bf9481e7923e32ff07126cc66c35b",
+  "sdk_vitagl_sha256": "dff979edde7e1f56419c096a0cc439136e8d2daaea3224e7c37bf05100162bdc",
   "shaders": {
     "35632-03be7fb3178e7220.bin": {
       "source": "sdl-untextured_fragment",

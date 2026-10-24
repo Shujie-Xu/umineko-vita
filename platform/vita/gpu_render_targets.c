@@ -35,7 +35,6 @@ extern GLboolean is_rendering_display;
 extern float *scissor_test_vertices;
 extern float x_port, x_scale, y_port, y_scale, z_port, z_scale;
 extern int DISPLAY_HEIGHT;
-extern void sceGxmSetViewport_sfp(SceGxmContext *, float, float, float, float, float, float);
 
 void __real_glViewport(GLint, GLint, GLsizei, GLsizei);
 void __wrap_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -44,7 +43,7 @@ void __wrap_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     /* The pinned SDK uses integer >>1 before conversion to float. An odd
      * target (including the 611px game canvas) loses a row/column and breaks
      * texel-aligned textbox joins. Retain its GL state updates, then install
-     * the exact half extents through the SDK's verified softfp bridge. */
+     * the exact half extents through the SDK's GXM stub. */
     x_scale = width * .5f;
     x_port = x + x_scale;
     y_scale = height * .5f;
@@ -53,7 +52,7 @@ void __wrap_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
         y_port = DISPLAY_HEIGHT - y - y_scale;
         y_scale = -y_scale;
     }
-    sceGxmSetViewport_sfp(gxm_context, x_port, x_scale, y_port, y_scale, z_port, z_scale);
+    sceGxmSetViewport(gxm_context, x_port, x_scale, y_port, y_scale, z_port, z_scale);
 }
 
 void __real_vector4f_convert_to_local_space(float *, int, int, int, int);

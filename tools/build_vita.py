@@ -126,7 +126,10 @@ driver = source(f"https://github.com/Rinnegatamante/vitaGL/archive/{VITAGL}.tar.
 for name in ("glsl_utils.c", "glsl_utils.h"):
     if (driver / "source/utils" / name).read_bytes() != (ROOT / "vendor/vitagl-translator/upstream" / name).read_bytes():
         raise ValueError(f"vitaGL source does not match the port: {name}")
-run("make", f"-j{args.jobs}", "SOFTFP_ABI=1", "NO_DEBUG=1", "HAVE_GLSL_SUPPORT=1", cwd=driver)
+# The pinned SDK already bridges softfp GXM calls. vitaGL's legacy
+# SOFTFP_ABI option would marshal viewport arguments a second time.
+run("make", "clean", cwd=driver)
+run("make", f"-j{args.jobs}", "NO_DEBUG=1", "HAVE_GLSL_SUPPORT=1", cwd=driver)
 # Debug paths are host-specific and must not change the shader fingerprint.
 run("arm-vita-eabi-objcopy", "--enable-deterministic-archives", "--strip-debug", "--preserve-dates",
     driver / "libvitaGL.a", prefix / "lib/libvitaGL.a")

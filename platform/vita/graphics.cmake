@@ -1,20 +1,8 @@
 # Exact ONScripter-RU SDL_gpu fork, compiled natively against VitaSDK SDL2/vitaGL.
 # Included by the main Vita CMakeLists after project().
-# SDL2's built-in GXM renderer calls the VFP native viewport export as
-# softfp. Redirect only SDL2's archive references to vitaGL's proven bridge.
-# Do not wrap sceGxmSetViewport globally: vitaGL already bridges that call.
-set(ONS_NATIVE_SDL2 "${CMAKE_CURRENT_BINARY_DIR}/libons_sdl2_vita.a")
-add_custom_command(OUTPUT "${ONS_NATIVE_SDL2}"
-  COMMAND "${CMAKE_OBJCOPY}"
-    --redefine-sym sceGxmSetViewport=sceGxmSetViewport_sfp
-    "${ONS_NATIVE_DEPS_ROOT}/lib/libSDL2.a" "${ONS_NATIVE_SDL2}"
-  DEPENDS "${ONS_NATIVE_DEPS_ROOT}/lib/libSDL2.a"
-  COMMENT "Adapting SDL2 native GXM viewport ABI without modifying the SDK"
-  VERBATIM)
-add_custom_target(ons_vita_sdl2_archive DEPENDS "${ONS_NATIVE_SDL2}")
 add_library(ons_vita_sdl2 STATIC IMPORTED GLOBAL)
-set_target_properties(ons_vita_sdl2 PROPERTIES IMPORTED_LOCATION "${ONS_NATIVE_SDL2}")
-add_dependencies(ons_vita_sdl2 ons_vita_sdl2_archive)
+set_target_properties(ons_vita_sdl2 PROPERTIES
+  IMPORTED_LOCATION "${ONS_NATIVE_DEPS_ROOT}/lib/libSDL2.a")
 
 # Built from source with ONScripter's two offline decoder locks removed.
 add_library(ons_vita_mixer STATIC IMPORTED GLOBAL)
