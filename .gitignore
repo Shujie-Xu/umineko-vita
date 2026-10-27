@@ -59,6 +59,7 @@ extras/scripts/*.py
 platform/**/*.py
 platform/**/*.md
 platform/**/tests/
+tools/
 !/tools/
 /tools/*
 !/tools/tests/

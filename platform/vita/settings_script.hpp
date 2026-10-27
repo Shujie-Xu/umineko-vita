@@ -117,9 +117,9 @@ inline bool apply(char *buffer, size_t length, bool japanesePack = false, bool p
     // helpers whose original line/label offsets must remain unchanged.
     // Compact operators/command spacing fit the older Spanish line slots.
     const std::string selection = R"ONS(operate_config read,$Free3,"game-script"
-for %Free6=0 to %Free2
-getscriptpath $Free4,%Free6
-if $Free3=$Free4 mov%Free5,%Free6
+for %Free5=%Free2 to 1 step -1
+getscriptpath $Free4,%Free5
+if $Free3=$Free4 break
 next
 )ONS";
     // Adapt command strings before fitting them into the unchanged script lines.

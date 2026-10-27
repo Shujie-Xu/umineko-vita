@@ -6,6 +6,7 @@ import re
 import shlex
 import struct
 import subprocess
+import sys
 import tempfile
 import zlib
 
@@ -27,6 +28,53 @@ def decode(path, engine):
     result = transform(zlib.decompress(transform(data[16:], 'CompressedCrcA')), 'CompressedCrcB')
     assert len(result) == length
     return result.replace(b'\r', b'') + b'\n'
+
+
+def check_generator(source, reference):
+    sys.path.insert(0, str(ROOT / 'tools'))
+    from prepare_cn_assets import build_script, encode_script, script_order, translate_files
+    from functools import cmp_to_key
+
+    raw = build_script(source)
+    assert raw == build_script(source), 'Script generation is not reproducible'
+    assert b';gameid UminekoPS3ficationCn' in raw
+    assert b'stralias localisation,"cn"' in raw
+    for episode in range(1, 9):
+        for label in (f'umi{episode}_op', f'ura_{episode}_end'):
+            assert re.search(rb'^\*' + label.encode() + rb'\s*$', raw, re.M), label
+    encoded = encode_script(raw)
+    assert encoded == encode_script(raw), 'ONS2 encoding is not reproducible'
+    engine = (ROOT / 'upstream/onscripter-ru/Engine/Handlers/Script.cpp').read_text()
+    with tempfile.TemporaryDirectory(prefix='umineko-generator-') as temporary:
+        directory = Path(temporary)
+        binary = directory / 'cn.file'
+        binary.write_bytes(encoded)
+        assert decode(binary, engine) == raw.replace(b'.txt', b'.file').replace(b'\r', b'') + b'\n'
+        if reference:
+            normalise = lambda data: re.sub(rb'(?m)^numalias releasedate,[0-9]+', b'numalias releasedate,DATE', data)
+            assert normalise(raw) == normalise((reference / 'cn.txt').read_bytes()), 'PHP text mismatch'
+            assert normalise(decode(binary, engine)) == normalise(decode(reference / 'cn.file', engine)), 'PHP ONS2 content mismatch'
+
+        game, japanese, chinese = (directory / name for name in ('game', 'jp', 'cn'))
+        for folder in (game, japanese, chinese):
+            folder.mkdir()
+            (folder / '._ignore.txt').write_bytes(b'Not a script')
+        originals = {'umi1_2.txt': b'`a`\n`b`', 'umi1_10.txt': b'`old`', 'umi1_op.txt': b'`opening`'}
+        translations = {'a.txt': ' \t\u3000new\u3000 \r\n'.encode(), 'b.txt': b'`b`\n`c`', 'c.txt': b'`intro`'}
+        for name, data in originals.items():
+            (japanese / name).write_bytes(data)
+        for name, data in translations.items():
+            (chinese / name).write_bytes(data)
+        for name, data in {'umi1_2.txt': b'`a` `b` `a`', 'umi1_10.txt': b'`old` `old`', 'umi1_op.txt': b'`opening`'}.items():
+            (game / name).write_bytes(data)
+        assert translate_files(game, japanese, chinese) == '`intro`\n`b` `c` `a`\n`\u3000new\u3000` `old`\n'.encode()
+        (game / 'umi1_10.txt').write_bytes(b'{c:86EF9C:`old`}[gstg 1]')
+        (chinese / 'a.txt').write_bytes(b'`new`[gstg 2]')
+        assert translate_files(game, japanese, chinese, grim=True).endswith(b'`new`[gstg 2]\n')
+        names = ['umi1_10.txt', 'umi1_2.txt', 'umi1_02.txt', 'umi1_op.txt']
+        assert sorted(names, key=cmp_to_key(script_order)) == ['umi1_op.txt', 'umi1_02.txt', 'umi1_2.txt', 'umi1_10.txt']
+    print('Verified reproducible script generation, ONS2 round-trip and replacement edge cases'
+          + ('; PHP text and decoded payload match' if reference else ''))
 
 
 def check(paths):
@@ -194,9 +242,10 @@ int main(int argc, char **argv) {
                 const auto count = unsigned(bool(mask & 1)) + unsigned(bool(mask & 2)) + unsigned(bool(mask & 4));
                 assert(settings.find("mov %Free2," + std::to_string(count + unsigned(bool(mask & 8)))) != settings.npos);
                 assert(settings.find("operate_config read,$Free3,\"game-script\"") != settings.npos);
-                assert(settings.find("for %Free6=0 to %Free2") != settings.npos);
-                assert(settings.find("getscriptpath $Free4,%Free6") != settings.npos);
-                assert(settings.find("if $Free3=$Free4 mov%Free5,%Free6") != settings.npos);
+                assert(settings.find("for %Free5=%Free2 to 1 step -1") != settings.npos);
+                assert(settings.find("getscriptpath $Free4,%Free5") != settings.npos);
+                assert(settings.find("if $Free3=$Free4 break") != settings.npos);
+                assert(settings.find("%Free6") == settings.npos);
                 assert((languages.find("ZH-CN") != languages.npos) == bool(mask & 8));
                 assert(languages.find(subtitles ? ",922" : ",748") != languages.npos);
                 const auto loopStart = VitaSettings::label(index, "settings_loop");
@@ -230,5 +279,12 @@ int main(int argc, char **argv) {
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source', type=Path, help='Also check the pinned local umineko-scripting checkout')
+    parser.add_argument('--reference', type=Path, help='Original PHP output directory containing cn.txt and cn.file')
     parser.add_argument('scripts', type=Path, nargs='+', help='Real en/jp/pt/es/cn.file scripts')
-    check(parser.parse_args().scripts)
+    args = parser.parse_args()
+    if args.reference and not args.source:
+        parser.error('--reference requires --source')
+    if args.source:
+        check_generator(args.source, args.reference)
+    check(args.scripts)
